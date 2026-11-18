@@ -1,0 +1,142 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+		A10000000000000000000001 /* Yingke */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Yingke; sourceTree = "<group>"; };
+		A10000000000000000000002 /* YingkeUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = YingkeUITests; sourceTree = "<group>"; };
+		A10000000000000000000003 /* Yingke.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yingke.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000004 /* YingkeUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YingkeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000005 /* Main group */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000006); sourceTree = "<group>"; };
+		A10000000000000000000006 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000003, A10000000000000000000004); name = Products; sourceTree = "<group>"; };
+		A10000000000000000000007 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000008 /* App Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000001D); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000009 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A1000000000000000000000A /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A1000000000000000000000B /* Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A1000000000000000000000C /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A1000000000000000000000D /* Yingke */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000013;
+			buildPhases = (A10000000000000000000007, A10000000000000000000008, A10000000000000000000009);
+			dependencies = ();
+			fileSystemSynchronizedGroups = (A10000000000000000000001);
+			name = Yingke;
+			packageProductDependencies = (A1000000000000000000001C);
+			productName = Yingke;
+			productReference = A10000000000000000000003;
+			productType = "com.apple.product-type.application";
+		};
+		A1000000000000000000000E /* YingkeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000014;
+			buildPhases = (A1000000000000000000000A, A1000000000000000000000B, A1000000000000000000000C);
+			dependencies = (A10000000000000000000010);
+			fileSystemSynchronizedGroups = (A10000000000000000000002);
+			name = YingkeUITests;
+			productName = YingkeUITests;
+			productReference = A10000000000000000000004;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		A1000000000000000000000F /* Project */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = { A1000000000000000000000E = { TestTargetID = A1000000000000000000000D; }; };
+			};
+			buildConfigurationList = A10000000000000000000012;
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = ("zh-Hans", Base);
+			mainGroup = A10000000000000000000005;
+			packageReferences = (A1000000000000000000001B);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A10000000000000000000006;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A1000000000000000000000D, A1000000000000000000000E);
+		};
+		A10000000000000000000010 /* App dependency */ = {isa = PBXTargetDependency; target = A1000000000000000000000D; targetProxy = A10000000000000000000011; };
+		A10000000000000000000011 /* App proxy */ = {isa = PBXContainerItemProxy; containerPortal = A1000000000000000000000F; proxyType = 1; remoteGlobalIDString = A1000000000000000000000D; remoteInfo = Yingke; };
+		A10000000000000000000012 /* Project configurations */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000015, A10000000000000000000016); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000013 /* App configurations */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000017, A10000000000000000000018); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000014 /* Test configurations */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000019, A1000000000000000000001A); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000015 /* Project Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000000000000000000016 /* Project Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A10000000000000000000017 /* App Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_KEY_CFBundleDisplayName = "应刻";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				"INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.zzstar101.yingke;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		A10000000000000000000018 /* App Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_KEY_CFBundleDisplayName = "应刻";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				"INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.zzstar101.yingke;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		A10000000000000000000019 /* Test Debug */ = {isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = io.github.zzstar101.yingke.uitests; PRODUCT_NAME = "$(TARGET_NAME)"; TEST_TARGET_NAME = Yingke; }; name = Debug; };
+		A1000000000000000000001A /* Test Release */ = {isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = io.github.zzstar101.yingke.uitests; PRODUCT_NAME = "$(TARGET_NAME)"; TEST_TARGET_NAME = Yingke; }; name = Release; };
+		A1000000000000000000001B /* CampusCore package */ = {isa = XCLocalSwiftPackageReference; relativePath = CampusCore; };
+		A1000000000000000000001C /* CampusCore product */ = {isa = XCSwiftPackageProductDependency; package = A1000000000000000000001B; productName = CampusCore; };
+		A1000000000000000000001D /* CampusCore in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000001C; };
+	};
+	rootObject = A1000000000000000000000F /* Project */;
+}
