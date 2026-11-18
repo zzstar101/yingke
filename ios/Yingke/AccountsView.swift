@@ -105,6 +105,7 @@ struct PlatformDetailView: View {
     @State private var confirmingDisconnect = false
     @State private var disconnecting = false
     @State private var disconnectFailed = false
+    @State private var showingAcademicAuthorization = false
 
     var body: some View {
         let snapshot = model.snapshot(for: platform)
@@ -122,9 +123,13 @@ struct PlatformDetailView: View {
                             .foregroundStyle(CampusTheme.accent)
                     }
                 }
-                services
                 if let snapshot {
                     connectionPanel(snapshot)
+                    if platform == .academic, let bindingID = snapshot.bindingID {
+                        academicServices(bindingID: bindingID)
+                    } else {
+                        services
+                    }
                 } else if model.loadFailed {
                     Button("重新读取账号状态") { Task { await model.reload() } }
                         .buttonStyle(.bordered)
@@ -152,6 +157,36 @@ struct PlatformDetailView: View {
         } message: {
             Text("将移除该平台的本机会话、凭据和缓存。其他校园平台可继续使用。")
         }
+        .sheet(isPresented: $showingAcademicAuthorization) {
+            AcademicAuthorizationView(model: model)
+        }
+    }
+
+    private func academicServices(bindingID: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach([AcademicEndpoint.schedule, .grades, .exams, .plan], id: \.self) { endpoint in
+                if endpoint != .schedule { Divider().overlay(CampusTheme.line) }
+                NavigationLink {
+                    BoundAcademicDataView(endpoint: endpoint, bindingID: bindingID, model: model)
+                } label: {
+                    HStack {
+                        Text(endpoint.title)
+                            .foregroundStyle(CampusTheme.ink)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(CampusTheme.muted)
+                            .accessibilityHidden(true)
+                    }
+                    .frame(minHeight: 48)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(CampusPressStyle())
+                .accessibilityIdentifier("academic.service.\(endpoint)")
+            }
+        }
+        .padding(.horizontal, 16)
+        .background(CampusTheme.surface, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var services: some View {
@@ -176,6 +211,16 @@ struct PlatformDetailView: View {
 
     private func connectionPanel(_ snapshot: ConnectionSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if platform == .academic && snapshot.canConnect {
+                Button("绑定教务账号") { showingAcademicAuthorization = true }
+                    .buttonStyle(.borderedProminent)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("academic.bind")
+            } else if platform == .academic && [.expired, .actionRequired].contains(snapshot.status) {
+                Text("教务会话需要重新授权。可查看已缓存的数据，重新绑定前请先解绑当前账号。")
+                    .font(.subheadline)
+                    .foregroundStyle(CampusTheme.muted)
+            }
             if snapshot.canDisconnect {
                 Button(snapshot.status == .cleanupRequired ? "继续清理" : "解绑账号", role: .destructive) {
                     confirmingDisconnect = true
@@ -196,5 +241,23 @@ struct PlatformDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct BoundAcademicDataView: View {
+    let endpoint: AcademicEndpoint
+    let bindingID: String
+    let model: AccountsModel
+
+    var body: some View {
+        if model.snapshot(for: .academic)?.bindingID == bindingID {
+            AcademicDataView(endpoint: endpoint) { endpoint, fields in
+                try await model.academicData(endpoint, fields: fields, bindingID: bindingID)
+            }
+            .id(bindingID)
+        } else {
+            ContentUnavailableView("教务账号已解绑", systemImage: "person.crop.circle.badge.minus")
+                .navigationTitle(endpoint.title)
+        }
     }
 }

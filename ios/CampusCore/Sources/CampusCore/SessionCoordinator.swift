@@ -19,7 +19,7 @@ public enum SessionFailure: Error, Equatable, Sendable {
 }
 
 /// Create one coordinator per storage composition. All binding mutations pass through this actor.
-public actor LocalSessionCoordinator: SessionCoordinator {
+public actor LocalSessionCoordinator: AcademicSessionCoordinator {
     private let providers: [CampusPlatform: any Provider]
     private let registry: any ConnectionRegistry
     private let vault: any CredentialVault
@@ -28,6 +28,7 @@ public actor LocalSessionCoordinator: SessionCoordinator {
     private var operations: [CampusPlatform: Operation] = [:]
     private var unboundStatus: [CampusPlatform: ConnectionStatus] = [:]
     private var pendingCleanup: Set<CampusPlatform> = []
+    private var academicRead: (id: UUID, cancel: @Sendable () -> Void)?
 
     private struct Operation {
         let id: UUID
@@ -73,7 +74,8 @@ public actor LocalSessionCoordinator: SessionCoordinator {
                 platform: platform,
                 status: status,
                 canConnect: record == nil && !isConnecting && !cleanupRequired && providers[platform] != nil,
-                canDisconnect: record != nil || isConnecting || cleanupRequired
+                canDisconnect: record != nil || isConnecting || cleanupRequired,
+                bindingID: cleanupRequired ? nil : record?.namespace.opaqueID
             )
         }
     }
@@ -171,6 +173,7 @@ public actor LocalSessionCoordinator: SessionCoordinator {
     }
 
     private func validate(_ platform: CampusPlatform, kind: Kind) async throws -> ConnectionStatus {
+        if platform == .academic && academicRead != nil { throw SessionFailure.busy }
         if pendingCleanup.contains(platform) { return .cleanupRequired }
         guard let record = try registry.record(for: platform) else {
             return operations[platform]?.kind == .connect ? .authenticating : (unboundStatus[platform] ?? .unbound)
@@ -246,7 +249,95 @@ public actor LocalSessionCoordinator: SessionCoordinator {
         }
         return status
     }
+    public func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String? = nil) async throws -> AcademicDataResult {
+        try Task.checkCancellation()
+        let platform = CampusPlatform.academic
+        guard let provider = providers[platform] as? any AcademicPageProvider else { throw SessionFailure.unsupported }
+        guard !pendingCleanup.contains(platform), let record = try registry.record(for: platform),
+              record.status != .cleanupRequired else { throw ProviderFailure.actionRequired }
+        if let bindingID, bindingID != record.namespace.opaqueID { throw SessionFailure.superseded }
+        let key = try academicCacheKey(endpoint, fields: fields)
+        let fallback = { [cache] (needsAuthorization: Bool) in
+            guard let cached = try? cache.value(for: key, in: record.namespace),
+                  let content = try? JSONDecoder().decode(AcademicContent.self, from: cached.data) else { return nil as AcademicDataResult? }
+            return AcademicDataResult(content: content, updatedAt: cached.updatedAt, isCached: true, needsAuthorization: needsAuthorization)
+        }
+        guard record.status != .expired && record.status != .actionRequired else {
+            if let data = fallback(true) { return data }
+            throw ProviderFailure.actionRequired
+        }
+        let session = switch record.persistence {
+        case .keychain: try vault.load(in: record.namespace)
+        case .memoryOnly: memory[record.namespace]
+        }
+        guard let session else {
+            _ = try persistStatus(.actionRequired, for: record)
+            if let data = fallback(true) { return data }
+            throw ProviderFailure.actionRequired
+        }
+        guard academicRead == nil, operations[platform] == nil else {
+            if let data = fallback(false) { return data }
+            throw SessionFailure.busy
+        }
+
+        let id = UUID()
+        let task = Task { try await provider.page(endpoint, session: session, fields: fields) }
+        academicRead = (id, { task.cancel() })
+        defer { if academicRead?.id == id { academicRead = nil } }
+        let page: AcademicPage
+        do {
+            page = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+        } catch {
+            guard academicRead?.id == id else { throw SessionFailure.superseded }
+            try Task.checkCancellation()
+            let failure = providerFailure(error)
+            _ = try persistStatus(status(for: failure), for: record)
+            if let data = fallback(failure == .expired || failure == .actionRequired) { return data }
+            throw failure
+        }
+        guard academicRead?.id == id else { throw SessionFailure.superseded }
+        try Task.checkCancellation()
+        guard page.session.remoteUserID.utf8.elementsEqual(session.remoteUserID.utf8) else {
+            _ = try persistStatus(.actionRequired, for: record)
+            throw ProviderFailure.actionRequired
+        }
+        if page.session != session {
+            switch record.persistence {
+            case .keychain: try vault.save(page.session, in: record.namespace)
+            case .memoryOnly: memory[record.namespace] = page.session
+            }
+        }
+        _ = try persistStatus(.connected, for: record)
+        let content: AcademicContent
+        do {
+            content = try AcademicContent(endpoint: endpoint, html: page.html)
+            try content.checkSelection(fields)
+        } catch {
+            if let data = fallback(false) { return data }
+            throw error
+        }
+        let updatedAt = Date()
+        let encoded = try JSONEncoder().encode(content)
+        try cache.save(CachedValue(data: encoded, updatedAt: updatedAt), for: key, in: record.namespace)
+        return AcademicDataResult(content: content, updatedAt: updatedAt, isCached: false)
+    }
+
+    private func academicCacheKey(_ endpoint: AcademicEndpoint, fields: [String: String]?) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let selection = try encoder.encode(fields)
+        return "academic.v1.\(endpoint).\(selection.base64EncodedString())"
+    }
+
     public func disconnect(_ platform: CampusPlatform) throws {
+        if platform == .academic {
+            academicRead?.cancel()
+            academicRead = nil
+        }
         operations.removeValue(forKey: platform)?.task.cancel()
         unboundStatus.removeValue(forKey: platform)
         pendingCleanup.insert(platform)

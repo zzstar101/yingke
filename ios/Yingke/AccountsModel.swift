@@ -42,6 +42,35 @@ final class AccountsModel {
         }
     }
 
+    func authorizeAcademic(_ authorization: AcademicAuthorization, persistence: CredentialPersistence) async throws {
+        let coordinator = try localCoordinator()
+        do {
+            try await coordinator.connect(.academic, using: authorization, persistence: persistence)
+        } catch {
+            await reload()
+            throw error
+        }
+        await reload()
+    }
+
+    func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String) async throws -> AcademicDataResult {
+        guard snapshot(for: .academic)?.bindingID == bindingID else { throw SessionFailure.superseded }
+        guard let coordinator = try localCoordinator() as? any AcademicSessionCoordinator else {
+            throw SessionFailure.unsupported
+        }
+        let result: AcademicDataResult
+        do {
+            result = try await coordinator.academicData(endpoint, fields: fields, bindingID: bindingID)
+        } catch {
+            await reload()
+            throw error
+        }
+        await reload()
+        try Task.checkCancellation()
+        guard snapshot(for: .academic)?.bindingID == bindingID else { throw SessionFailure.superseded }
+        return result
+    }
+
     private func localCoordinator() throws -> any SessionCoordinator {
         if let coordinator { return coordinator }
         let coordinator: any SessionCoordinator

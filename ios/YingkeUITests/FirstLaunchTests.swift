@@ -9,6 +9,7 @@ final class FirstLaunchTests: XCTestCase {
     @MainActor
     func testHomeOpensWithoutAnAccountAndExplainsTheCourseSchedule() {
         let app = XCUIApplication()
+        app.launchArguments.append("--ui-test-local-authorization")
         app.launch()
 
         XCTAssertTrue(app.staticTexts["应刻"].waitForExistence(timeout: 8))
@@ -18,8 +19,15 @@ final class FirstLaunchTests: XCTestCase {
         schedule.tap()
 
         XCTAssertTrue(app.navigationBars["强智教务"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["当前版本暂未开放绑定"].waitForExistence(timeout: 5))
+        let bind = app.buttons["academic.bind"]
+        XCTAssertTrue(bind.waitForExistence(timeout: 5))
         XCTAssertFalse(app.secureTextFields.firstMatch.exists)
+        bind.tap()
+        XCTAssertTrue(app.navigationBars["教务账号授权"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches["academic.rememberSession"].exists)
+        XCTAssertTrue(app.staticTexts["合成授权页"].waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        XCTAssertTrue(bind.waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -65,6 +73,42 @@ final class FirstLaunchTests: XCTestCase {
         app.navigationBars["强智教务"].buttons.firstMatch.tap()
         assertStatus("未绑定", for: academic)
         assertStatus("已绑定", for: app.buttons["accounts.chaoxing"])
+    }
+
+    @MainActor
+    func testAcademicScheduleShowsClassesAndCachedEmptyWeek() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-test-bound-accounts")
+        app.launch()
+        app.buttons["home.schedule"].tap()
+        let schedule = app.buttons["academic.service.schedule"]
+        XCTAssertTrue(schedule.waitForExistence(timeout: 5))
+        schedule.tap()
+        XCTAssertTrue(app.staticTexts["示例课程"].waitForExistence(timeout: 5))
+        app.buttons["academic.schedule.week"].tap()
+        app.buttons["第4周"].tap()
+        XCTAssertTrue(app.staticTexts["当前筛选没有课程"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["academic.schedule.freshness"].label.contains("缓存"))
+
+        app.buttons["academic.schedule.term"].tap()
+        app.buttons["下一学期"].tap()
+        let weekPicker = app.buttons["academic.schedule.week"]
+        let newWeek = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第1周"), object: weekPicker)
+        XCTAssertEqual(XCTWaiter.wait(for: [newWeek], timeout: 5), .completed)
+
+        app.tabBars.buttons["校园账号"].tap()
+        app.buttons["accounts.academic"].tap()
+        app.buttons["解绑账号"].tap()
+        app.buttons["解绑并清理本机数据"].tap()
+        XCTAssertTrue(app.staticTexts["未绑定"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["首页"].tap()
+        let removed = app.staticTexts["教务账号已解绑"]
+        if !removed.waitForExistence(timeout: 4) {
+            // SwiftUI can pop the old destination when its originating link is removed.
+            XCTAssertTrue(app.navigationBars["强智教务"].exists)
+        }
+        XCTAssertFalse(app.staticTexts["academic.schedule.freshness"].exists)
+        XCTAssertFalse(app.staticTexts["示例课程"].exists)
     }
 
     @MainActor

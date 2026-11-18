@@ -9,6 +9,7 @@ import Testing
 
     let snapshots = try await core.snapshot()
     #expect(snapshots.map(\.platform) == [.academic, .chaoxing, .campusSSO, .secondClassroom])
-    #expect(snapshots.allSatisfy { $0.status == .unbound && !$0.canConnect && !$0.canDisconnect })
+    #expect(snapshots.allSatisfy { $0.status == .unbound && !$0.canDisconnect })
+    #expect(snapshots.filter(\.canConnect).map(\.platform) == [.academic])
     try await core.disconnect(.academic)
 }

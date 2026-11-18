@@ -15,13 +15,16 @@ public struct ConnectionSnapshot: Sendable, Equatable, Identifiable {
     public let status: ConnectionStatus
     public let canConnect: Bool
     public let canDisconnect: Bool
+    /// An opaque local token for the lifetime of a binding, used to discard rendered data when it changes.
+    public let bindingID: String?
     public var id: CampusPlatform { platform }
 
-    public init(platform: CampusPlatform, status: ConnectionStatus, canConnect: Bool, canDisconnect: Bool) {
+    public init(platform: CampusPlatform, status: ConnectionStatus, canConnect: Bool, canDisconnect: Bool, bindingID: String? = nil) {
         self.platform = platform
         self.status = status
         self.canConnect = canConnect
         self.canDisconnect = canDisconnect
+        self.bindingID = bindingID
     }
 }
 
