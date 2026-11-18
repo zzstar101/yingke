@@ -1,0 +1,43 @@
+# macOS / Xcode
+.DS_Store
+DerivedData/
+.build/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+*.xcactivitylog
+*.ipa
+*.app
+*.dSYM/
+
+# Credentials and private config
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision
+*.key
+*.pem
+*.keystore
+*.jks
+*credentials*.json
+*secrets*.json
+
+# Campus session captures / user data
+*.har
+*.pcap
+*.pcapng
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*cookie-dump*
+*session-dump*
+*.log
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
