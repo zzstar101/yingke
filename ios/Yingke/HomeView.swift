@@ -2,6 +2,7 @@ import CampusCore
 import SwiftUI
 
 struct HomeView: View {
+    let academicIsBound: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
@@ -47,7 +48,8 @@ struct HomeView: View {
     }
 
     private func scheduleLink(date: String) -> some View {
-        NavigationLink(value: CampusPlatform.academic) {
+        let subtitle = academicIsBound ? "查看本周课程安排" : "关联强智教务后查看课程"
+        return NavigationLink(value: HomeRoute.timetable) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(date)
                     .font(.subheadline.weight(.medium))
@@ -56,7 +58,7 @@ struct HomeView: View {
                 Text("今日课表")
                     .font(.largeTitle.weight(.bold))
                     .accessibilityAddTraits(.isHeader)
-                Text("关联强智教务后查看课程")
+                Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.93))
                 Label("查看课表入口", systemImage: "arrow.right")
@@ -91,7 +93,7 @@ struct HomeView: View {
             .clipShape(RoundedRectangle(cornerRadius: 24))
         }
         .buttonStyle(CampusPressStyle())
-        .accessibilityLabel(Text("今日课表，\(date)，关联强智教务后查看课程"))
+        .accessibilityLabel(Text("今日课表，\(date)，\(subtitle)"))
         .accessibilityIdentifier("home.schedule")
     }
 

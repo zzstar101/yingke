@@ -249,7 +249,9 @@ public actor LocalSessionCoordinator: AcademicSessionCoordinator {
         }
         return status
     }
-    public func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String? = nil) async throws -> AcademicDataResult {
+    public func academicData(
+        _ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String? = nil, forceRefresh: Bool = false
+    ) async throws -> AcademicDataResult {
         try Task.checkCancellation()
         let platform = CampusPlatform.academic
         guard let provider = providers[platform] as? any AcademicPageProvider else { throw SessionFailure.unsupported }
@@ -257,13 +259,37 @@ public actor LocalSessionCoordinator: AcademicSessionCoordinator {
               record.status != .cleanupRequired else { throw ProviderFailure.actionRequired }
         if let bindingID, bindingID != record.namespace.opaqueID { throw SessionFailure.superseded }
         let key = try academicCacheKey(endpoint, fields: fields)
-        let fallback = { [cache] (needsAuthorization: Bool) in
+        func cachedContent(for key: String) -> (content: AcademicContent, updatedAt: Date)? {
             guard let cached = try? cache.value(for: key, in: record.namespace),
-                  let content = try? JSONDecoder().decode(AcademicContent.self, from: cached.data) else { return nil as AcademicDataResult? }
-            return AcademicDataResult(content: content, updatedAt: cached.updatedAt, isCached: true, needsAuthorization: needsAuthorization)
+                  let content = try? JSONDecoder().decode(AcademicContent.self, from: cached.data) else { return nil }
+            return (content, cached.updatedAt)
         }
+        func cachedData(needsAuthorization: Bool = false, syncFailed: Bool = false) -> AcademicDataResult? {
+            var cached = cachedContent(for: key)
+            if endpoint == .schedule || endpoint == .semesterSchedule {
+                // The default page identifies the selection that can share its cached result.
+                if fields == nil, let defaultPage = cached,
+                   case let .schedule(schedule) = defaultPage.content,
+                   let exactKey = try? academicCacheKey(endpoint, fields: schedule.fields),
+                   let exactPage = cachedContent(for: exactKey), case let .schedule(exact) = exactPage.content,
+                   exact.fields == schedule.fields, exactPage.updatedAt > defaultPage.updatedAt {
+                    cached = exactPage
+                } else if let fields, let defaultKey = try? academicCacheKey(endpoint, fields: nil),
+                          let defaultPage = cachedContent(for: defaultKey),
+                          case let .schedule(schedule) = defaultPage.content, schedule.fields == fields,
+                          cached.map({ defaultPage.updatedAt > $0.updatedAt }) ?? true {
+                    cached = defaultPage
+                }
+            }
+            guard let cached else { return nil }
+            return AcademicDataResult(content: cached.content, updatedAt: cached.updatedAt, isCached: true,
+                                      needsAuthorization: needsAuthorization, syncFailed: syncFailed)
+        }
+        let needsAuthorization = record.status == .expired || record.status == .actionRequired
+            || (record.persistence == .memoryOnly && memory[record.namespace] == nil)
+        if !forceRefresh, let data = cachedData(needsAuthorization: needsAuthorization) { return data }
         guard record.status != .expired && record.status != .actionRequired else {
-            if let data = fallback(true) { return data }
+            if let data = cachedData(needsAuthorization: true) { return data }
             throw ProviderFailure.actionRequired
         }
         let session = switch record.persistence {
@@ -272,11 +298,11 @@ public actor LocalSessionCoordinator: AcademicSessionCoordinator {
         }
         guard let session else {
             _ = try persistStatus(.actionRequired, for: record)
-            if let data = fallback(true) { return data }
+            if let data = cachedData(needsAuthorization: true) { return data }
             throw ProviderFailure.actionRequired
         }
         guard academicRead == nil, operations[platform] == nil else {
-            if let data = fallback(false) { return data }
+            if let data = cachedData(syncFailed: true) { return data }
             throw SessionFailure.busy
         }
 
@@ -294,9 +320,14 @@ public actor LocalSessionCoordinator: AcademicSessionCoordinator {
         } catch {
             guard academicRead?.id == id else { throw SessionFailure.superseded }
             try Task.checkCancellation()
+            if endpoint == .semesterSchedule, error is AcademicHTML.Error {
+                if let data = cachedData(syncFailed: true) { return data }
+                throw error
+            }
             let failure = providerFailure(error)
             _ = try persistStatus(status(for: failure), for: record)
-            if let data = fallback(failure == .expired || failure == .actionRequired) { return data }
+            if let data = cachedData(needsAuthorization: failure == .expired || failure == .actionRequired,
+                                     syncFailed: true) { return data }
             throw failure
         }
         guard academicRead?.id == id else { throw SessionFailure.superseded }
@@ -314,10 +345,10 @@ public actor LocalSessionCoordinator: AcademicSessionCoordinator {
         _ = try persistStatus(.connected, for: record)
         let content: AcademicContent
         do {
-            content = try AcademicContent(endpoint: endpoint, html: page.html)
+            content = try AcademicContent(endpoint: endpoint, page: page)
             try content.checkSelection(fields)
         } catch {
-            if let data = fallback(false) { return data }
+            if let data = cachedData(syncFailed: true) { return data }
             throw error
         }
         let updatedAt = Date()

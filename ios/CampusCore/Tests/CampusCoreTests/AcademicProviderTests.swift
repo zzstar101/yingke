@@ -85,8 +85,102 @@ private let gradesHTML = #"<html><table id="dataList"><tr><th>课程名称</th><
     #expect(post.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded; charset=UTF-8")
     #expect(post.value(forHTTPHeaderField: "Cookie") == "JSESSIONID=prefetched")
     let body = try #require(post.httpBody)
-    #expect(String(decoding: body, as: UTF8.self) == "csrf=prefetched-token&dynamicPeriodKey=%E7%AC%AC+1%2B%26&xnxq01id=2026-2&zc=9")
+    #expect(String(decoding: body, as: UTF8.self) == "xnxq01id=2026-2&zc=9&csrf=prefetched-token&dynamicPeriodKey=%E7%AC%AC+1%2B%26")
     #expect(requests.dropFirst(2).allSatisfy { $0.httpBody == nil })
+}
+
+@Test func academicSemesterScheduleSubmitsTheExplicitAllWeeksOptionWithTermAndScheme() async throws {
+    let prefetch = scheduleHTML
+        .replacingOccurrences(of: "<form>", with: #"<form action="xskb_list.do" method="post">"#)
+        .replacingOccurrences(of: "</form>", with: """
+            <input type="hidden" name="csrf" value="prefetched-token">
+            <select name="scheme" aria-label="节次方案"><option value="A">方案一</option><option value="B">方案二</option></select></form>
+            """)
+        .replacingOccurrences(of: "<option value=\"2026-1\">2026-1</option>", with: """
+            <option value="2026-1" selected>2026-1</option><option value="2026-2">2026-2</option>
+            """)
+        .replacingOccurrences(of: "<option value=\"1\">1</option>", with: """
+            <option value="1" selected>第1周</option><option value="学期 +&amp;">整学期</option>
+            """)
+    let full = prefetch
+        .replacingOccurrences(of: " selected", with: "")
+        .replacingOccurrences(of: #"value="2026-2""#, with: #"value="2026-2" selected"#)
+        .replacingOccurrences(of: #"value="B""#, with: #"value="B" selected"#)
+        .replacingOccurrences(of: #"value="学期 +&amp;""#, with: #"value="学期 +&amp;" selected"#)
+    let server = AcademicTestServer([
+        .init(activation, html: "<html><frameset></frameset></html>"),
+        .init(schedule, html: scheduleHTML),
+        .init(schedule, html: prefetch),
+        .init(schedule, html: full),
+    ])
+    let provider = AcademicProvider(requestInterval: .zero) { try await server.send($0) }
+    let session = try await provider.connect(using: fixtureAuthorization())
+
+    let page = try await provider.page(.semesterSchedule, session: session, fields: ["xnxq01id": "2026-2", "scheme": "B"])
+    #expect(page.html == full)
+    let requests = Array(await server.requests.dropFirst(2))
+    #expect(requests.map(\.httpMethod) == ["GET", "POST"])
+    let post = try #require(requests.last)
+    #expect(post.httpBody == Data("xnxq01id=2026-2&zc=%E5%AD%A6%E6%9C%9F+%2B%26&csrf=prefetched-token&scheme=B".utf8))
+}
+
+@Test func academicSemesterScheduleCollectsEveryAdvertisedWeekWhenThereIsNoAllOption() async throws {
+    func page(_ week: Int, token: String, course: String) -> String {
+        scheduleHTML
+            .replacingOccurrences(of: #"<option value="1">1</option>"#, with: """
+                <option value="3" \(week == 3 ? "selected" : "")>第3周</option>
+                <option value="1" \(week == 1 ? "selected" : "")>第1周</option>
+                <option value="2" \(week == 2 ? "selected" : "")>第2周</option>
+                """)
+            .replacingOccurrences(of: "</form>", with: "<input type=hidden name=csrf value=\(token)></form>")
+            .replacingOccurrences(of: "<th>1</th><td></td>", with: "<th>1</th><td><div class=kbcontent>\(course)</div></td>")
+    }
+    let unmarked = page(2, token: "one", course: "专属课程")
+    let prefetch = unmarked.replacingOccurrences(of: ">第2周</option>", with: ">第2周（当前周）</option>")
+    #expect(try AcademicHTML.schedule(prefetch).lessons.count == 1)
+    let server = AcademicTestServer([
+        .init(activation, html: "<html><frameset></frameset></html>"),
+        .init(schedule, html: scheduleHTML),
+        .init(schedule, html: prefetch),
+        .init(schedule, html: page(1, token: "two", course: "普通课程")),
+        .init(schedule, html: page(3, token: "three", course: "普通课程")),
+    ])
+    let provider = AcademicProvider(requestInterval: .zero) { try await server.send($0) }
+    let session = try await provider.connect(using: fixtureAuthorization())
+
+    let result = try await provider.page(.semesterSchedule, session: session)
+    let term = try #require(result.semesterSchedule)
+    #expect(term.fields == ["xnxq01id": "2026-1"])
+    #expect(term.weeks.map(\.value) == ["1", "2", "3"])
+    #expect(term.currentTeachingWeek == 2)
+    #expect(term.teachingWeek() == 2)
+    #expect(term.lessons.count == 2)
+    #expect(term.lessons.first(where: { $0.courseName == "普通课程" })?.weeks == [1, 3])
+    #expect(term.lessons.first(where: { $0.courseName == "专属课程" })?.weeks == [2])
+    let requests = Array(await server.requests.dropFirst(2))
+    #expect(requests.map(\.httpMethod) == ["GET", "POST", "POST"])
+    #expect(requests[1].httpBody == Data("xnxq01id=2026-1&zc=1&csrf=one".utf8))
+    #expect(requests[2].httpBody == Data("xnxq01id=2026-1&zc=3&csrf=two".utf8))
+}
+
+@Test func academicFilteredScheduleUsesTheFormEvenWhenTheDefaultGridIsUnrecognized() async throws {
+    let prefetch = scheduleHTML.replacingOccurrences(of: "<th>1</th>", with: "<th>合成未知节次</th>")
+    let selected = scheduleHTML.replacingOccurrences(of: "<option value=\"1\">1</option>", with: "<option value=\"2\">2</option>")
+    let server = AcademicTestServer([
+        .init(activation, html: "<html><frameset></frameset></html>"),
+        .init(schedule, html: prefetch),
+        .init(schedule, html: prefetch),
+        .init(schedule, html: selected),
+    ])
+    let provider = AcademicProvider(requestInterval: .zero) { try await server.send($0) }
+    let session = try await provider.connect(using: fixtureAuthorization())
+
+    #expect(throws: AcademicHTML.Error.unexpectedPage) { _ = try AcademicHTML.schedule(prefetch) }
+    let page = try await provider.page(.schedule, session: session, fields: ["zc": "2"])
+    let requests = await server.requests
+    #expect(requests.map(\.httpMethod) == ["GET", "GET", "GET", "POST"])
+    #expect(requests.last?.httpBody == Data("xnxq01id=2026-1&zc=2".utf8))
+    #expect(try AcademicHTML.schedule(page.html).fields["zc"] == "2")
 }
 
 @Test(arguments: [false, true]) func academicRecognizesTheOfficialLoginFormOrRedirectAsExpired(_ redirect: Bool) async throws {
@@ -227,6 +321,45 @@ private let gradesHTML = #"<html><table id="dataList"><tr><th>课程名称</th><
     #expect(throws: AcademicHTML.Error.unexpectedPage) { _ = try AcademicHTML.grades(gradesPage.html) }
     #expect(throws: AcademicHTML.Error.unexpectedPage) { _ = try AcademicHTML.schedule(schedulePage.html) }
     #expect(await server.requests.map(\.httpMethod) == ["GET", "GET", "GET", "GET"])
+}
+
+@Test func academicSchedulePreservesRepeatedFormControlsWhenSelectingAWeek() async throws {
+    let formHTML = scheduleHTML.replacingOccurrences(of: "</form>", with: """
+        <input type=hidden name=display value=first>
+        <input type=hidden name=display value=second>
+        <input type=hidden name=zc value=original>
+        </form>
+        """)
+    let selectedHTML = formHTML.replacingOccurrences(of: #"name="zc"><option value="1">1"#, with: #"name="zc"><option value="2">2"#)
+    let server = AcademicTestServer([
+        .init(activation, html: "<html><frameset></frameset></html>"),
+        .init(schedule, html: formHTML),
+        .init(schedule, html: formHTML),
+        .init(schedule, html: selectedHTML),
+    ])
+    let provider = AcademicProvider(requestInterval: .zero) { try await server.send($0) }
+    let session = try await provider.connect(using: fixtureAuthorization())
+
+    #expect(try AcademicHTML.schedule(formHTML).fields["zc"] == "1")
+    let page = try await provider.page(.schedule, session: session, fields: ["zc": "2"])
+    #expect(try AcademicHTML.schedule(page.html).fields["zc"] == "2")
+    let request = try #require(await server.requests.last)
+    #expect(request.httpMethod == "POST")
+    #expect(request.httpBody == Data("xnxq01id=2026-1&zc=2&display=first&display=second&zc=original".utf8))
+}
+
+@Test func academicConfirmsSessionWhenRecognizedScheduleHasUnsupportedRows() async throws {
+    let changedLayout = scheduleHTML.replacingOccurrences(of: "<th>1</th>", with: "<th>节次标签暂未支持</th>")
+    let server = AcademicTestServer([
+        .init(activation, html: "<html><frameset></frameset></html>"),
+        .init(schedule, html: changedLayout),
+        .init(schedule, html: changedLayout),
+    ])
+    let provider = AcademicProvider(requestInterval: .zero) { try await server.send($0) }
+
+    let session = try await provider.connect(using: fixtureAuthorization())
+    _ = try await provider.probe(session)
+    #expect(throws: AcademicHTML.Error.unexpectedPage) { try AcademicHTML.schedule(changedLayout) }
 }
 
 @Test func academicRejectsA200ShellWithoutAnAuthenticatedSchedule() async throws {

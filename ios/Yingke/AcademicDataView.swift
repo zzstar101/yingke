@@ -4,7 +4,7 @@ import SwiftUI
 extension AcademicEndpoint {
     var title: String {
         switch self {
-        case .schedule: "课程表"
+        case .schedule, .semesterSchedule: "课程表"
         case .grades: "成绩查询"
         case .exams: "考试安排"
         case .plan: "培养方案"
@@ -13,7 +13,7 @@ extension AcademicEndpoint {
 
     fileprivate var viewID: String {
         switch self {
-        case .schedule: "schedule"
+        case .schedule, .semesterSchedule: "schedule"
         case .grades: "grades"
         case .exams: "exams"
         case .plan: "plan"
@@ -22,7 +22,7 @@ extension AcademicEndpoint {
 
     fileprivate var emptyTitle: String {
         switch self {
-        case .schedule: "当前筛选没有课程"
+        case .schedule, .semesterSchedule: "当前筛选没有课程"
         case .grades: "当前筛选没有成绩"
         case .exams: "教务系统未返回考试安排"
         case .plan: "教务系统未返回培养方案记录"
@@ -31,7 +31,7 @@ extension AcademicEndpoint {
 
     fileprivate var verificationNote: String? {
         switch self {
-        case .schedule, .grades: nil
+        case .schedule, .semesterSchedule, .grades: nil
         case .exams: "考试明细尚待真实记录验证，请以教务系统为准。"
         case .plan: "培养方案的字段映射尚未完整验证，请以教务系统为准。"
         }
@@ -40,7 +40,7 @@ extension AcademicEndpoint {
 
 struct AcademicDataView: View {
     let endpoint: AcademicEndpoint
-    let load: @MainActor (AcademicEndpoint, [String: String]?) async throws -> AcademicDataResult
+    let load: @MainActor (AcademicEndpoint, [String: String]?, Bool) async throws -> AcademicDataResult
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var request = Request()
@@ -53,6 +53,7 @@ struct AcademicDataView: View {
     private struct Request: Equatable {
         var fields: [String: String]?
         var revision = 0
+        var forceRefresh = false
     }
 
     private struct LoadedResult {
@@ -60,10 +61,7 @@ struct AcademicDataView: View {
         let data: AcademicDataResult
     }
 
-    private static let scheduleTermKey = "xnxq01id"
-    private static let scheduleWeekKey = "zc"
     private static let gradeTermKey = "kksj"
-    private static let weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
     private var loading: Bool { completedRequest != request }
 
@@ -98,7 +96,8 @@ struct AcademicDataView: View {
                     results(current.content)
                 }
             }
-            .padding(.vertical, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 16)
             .campusColumn()
         }
         .background(CampusTheme.background.ignoresSafeArea())
@@ -111,7 +110,7 @@ struct AcademicDataView: View {
                 Button {
                     reload()
                 } label: {
-                    Label("同步", systemImage: "arrow.clockwise")
+                    Label("刷新教务数据", systemImage: "arrow.clockwise")
                 }
                 .disabled(loading)
                 .accessibilityIdentifier(id("refresh"))
@@ -126,6 +125,7 @@ struct AcademicDataView: View {
 
     private func reload() {
         request.revision += 1
+        request.forceRefresh = true
     }
 
     private func select(_ fields: [String: String]) {
@@ -140,7 +140,7 @@ struct AcademicDataView: View {
             if !Task.isCancelled, query == request { completedRequest = query }
         }
         do {
-            let data = try await load(endpoint, query.fields)
+            let data = try await load(endpoint, query.fields, query.forceRefresh)
             guard !Task.isCancelled, query == request else { return }
             previous = LoadedResult(fields: query.fields, data: data)
             if case let .grades(grades) = data.content, !grades.terms.isEmpty {
@@ -164,36 +164,10 @@ struct AcademicDataView: View {
 
     @ViewBuilder private var filters: some View {
         switch previous?.data.content {
-        case let .schedule(schedule):
-            VStack(spacing: 0) {
-                scheduleFilter("学期", suffix: "term", key: Self.scheduleTermKey, options: schedule.terms, schedule: schedule)
-                if !schedule.weeks.isEmpty {
-                    separator
-                    scheduleFilter("教学周", suffix: "week", key: Self.scheduleWeekKey, options: schedule.weeks, schedule: schedule)
-                }
-                if let field = schedule.periodSchemeField, !schedule.periodSchemes.isEmpty {
-                    separator
-                    scheduleFilter("节次方案", suffix: "periodScheme", key: field, options: schedule.periodSchemes, schedule: schedule)
-                }
-            }
-            .academicSurface()
         case let .grades(grades):
             gradeFilter(grades)
-        case .exams, .plan, nil:
+        case .schedule, .exams, .plan, nil:
             EmptyView()
-        }
-    }
-
-    private func scheduleFilter(
-        _ title: String, suffix: String, key: String, options: [AcademicOption], schedule: AcademicSchedule
-    ) -> some View {
-        let fields = current == nil ? request.fields ?? schedule.fields : schedule.fields
-        return filter(title, suffix: suffix, options: options, selection: fields[key]) { value in
-            if key == Self.scheduleTermKey {
-                select([key: value])
-            } else {
-                select(fields.merging([key: value]) { _, new in new })
-            }
         }
     }
 
@@ -262,10 +236,6 @@ struct AcademicDataView: View {
         .accessibilityIdentifier(id(suffix))
     }
 
-    private var separator: some View {
-        Divider().overlay(CampusTheme.line).padding(.horizontal, 16)
-    }
-
     private func statusLabel(_ title: String, symbol: String, suffix: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol)
@@ -287,8 +257,10 @@ struct AcademicDataView: View {
         let showingPrevious = !loading && failure != nil
         let text = if result.needsAuthorization {
             "教务会话需要重新授权 · 显示本机缓存 · 上次同步于 \(date)"
-        } else if result.isCached {
+        } else if result.syncFailed {
             "同步失败 · 显示本机缓存 · 上次同步于 \(date)"
+        } else if result.isCached {
+            "本机缓存 · 同步于 \(date)"
         } else if showingPrevious {
             "正在显示上次结果 · 同步于 \(date)"
         } else {
@@ -344,79 +316,10 @@ struct AcademicDataView: View {
 
     @ViewBuilder private func results(_ content: AcademicContent) -> some View {
         switch content {
-        case let .schedule(schedule): scheduleResults(schedule)
+        case .schedule: EmptyView()
         case let .grades(grades): gradeResults(grades)
         case let .exams(records), let .plan(records): recordResults(records)
         }
-    }
-
-    @ViewBuilder private func scheduleResults(_ schedule: AcademicSchedule) -> some View {
-        if schedule.lessons.isEmpty {
-            emptyState("可以切换学期或教学周，再查看课程。")
-        } else {
-            let sorted = schedule.lessons.enumerated().sorted {
-                let a = $0.element
-                let b = $1.element
-                return (a.weekday, a.startPeriod, a.endPeriod, $0.offset) < (b.weekday, b.startPeriod, b.endPeriod, $1.offset)
-            }
-            let days = Dictionary(grouping: sorted, by: { $0.element.weekday })
-            ForEach(days.keys.sorted(), id: \.self) { day in
-                if let lessons = days[day] {
-                    let title = (1...Self.weekdays.count).contains(day) ? Self.weekdays[day - 1] : "星期未提供"
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(title)
-                            .font(.headline)
-                            .foregroundStyle(CampusTheme.accent)
-                            .accessibilityAddTraits(.isHeader)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(CampusTheme.soft)
-                        ForEach(lessons, id: \.offset) { index, lesson in
-                            if index != lessons.first?.offset { separator }
-                            lessonRow(lesson, periods: schedule.periods)
-                                .accessibilityElement(children: .contain)
-                                .accessibilityIdentifier(id("lesson.\(index)"))
-                        }
-                    }
-                    .academicSurface()
-                }
-            }
-        }
-    }
-
-    private func lessonRow(_ lesson: AcademicLesson, periods: [AcademicPeriod]) -> some View {
-        let periodLabel = lesson.startPeriod == lesson.endPeriod
-            ? "第 \(lesson.startPeriod) 节" : "第 \(lesson.startPeriod)–\(lesson.endPeriod) 节"
-        let weekLabel = lesson.weekLabel ?? (lesson.weeks.isEmpty ? nil : "第 \(lesson.weeks.map(String.init).joined(separator: "、")) 周")
-        return VStack(alignment: .leading, spacing: 5) {
-            if let start = periods.first(where: { $0.number == lesson.startPeriod }),
-               let end = periods.first(where: { $0.number == lesson.endPeriod }) {
-                Text("\(periodLabel) · \(start.startTime)–\(end.endTime)")
-                    .font(.subheadline.weight(.medium).monospacedDigit())
-                    .foregroundStyle(CampusTheme.accent)
-            } else {
-                Text(periodLabel)
-                    .font(.subheadline.weight(.medium).monospacedDigit())
-                    .foregroundStyle(CampusTheme.accent)
-            }
-            Text(lesson.courseName)
-                .font(.headline)
-                .foregroundStyle(CampusTheme.ink)
-            if let location = lesson.location, !location.isEmpty {
-                Label(location, systemImage: "mappin")
-            }
-            if let teacher = lesson.teacher, !teacher.isEmpty {
-                Label(teacher, systemImage: "person")
-            }
-            if let weekLabel, !weekLabel.isEmpty {
-                Label(weekLabel, systemImage: "calendar")
-            }
-        }
-        .font(.subheadline)
-        .foregroundStyle(CampusTheme.muted)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
     }
 
     @ViewBuilder private func gradeResults(_ grades: AcademicGrades) -> some View {

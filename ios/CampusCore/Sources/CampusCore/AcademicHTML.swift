@@ -23,7 +23,7 @@ public struct AcademicPeriod: Codable, Sendable, Equatable {
     }
 }
 
-public struct AcademicLesson: Codable, Sendable, Equatable {
+public struct AcademicLesson: Codable, Sendable, Hashable {
     public let courseName: String
     /// Monday is 1 and Sunday is 7.
     public let weekday: Int
@@ -51,17 +51,20 @@ public struct AcademicLesson: Codable, Sendable, Equatable {
 public struct AcademicSchedule: Codable, Sendable, Equatable {
     public let terms: [AcademicOption]
     public let weeks: [AcademicOption]
-    /// Selected term, week, and any recognized period scheme. Other form values stay in transport memory.
+    /// Selected term and any recognized period scheme. Legacy single-week queries also include the selected week.
     public let fields: [String: String]
     public let lessons: [AcademicLesson]
     /// Only periods for which the page supplied a start and end time.
     public let periods: [AcademicPeriod]
     public let periodSchemeField: String?
     public let periodSchemes: [AcademicOption]
+    /// The teaching week at sync time, when it was available.
+    public let currentTeachingWeek: Int?
+    private let teachingWeekObservedAt: Date?
 
     public init(terms: [AcademicOption], weeks: [AcademicOption], fields: [String: String],
                 lessons: [AcademicLesson], periods: [AcademicPeriod] = [], periodSchemeField: String? = nil,
-                periodSchemes: [AcademicOption] = []) {
+                periodSchemes: [AcademicOption] = [], currentTeachingWeek: Int? = nil, teachingWeekObservedAt: Date? = nil) {
         self.terms = terms
         self.weeks = weeks
         self.fields = fields
@@ -69,6 +72,59 @@ public struct AcademicSchedule: Codable, Sendable, Equatable {
         self.periods = periods
         self.periodSchemeField = periodSchemeField
         self.periodSchemes = periodSchemes
+        self.currentTeachingWeek = currentTeachingWeek
+        self.teachingWeekObservedAt = teachingWeekObservedAt
+    }
+
+    /// Resolves the cached teaching week using local Mondays in Asia/Shanghai.
+    public func teachingWeek(on date: Date = .now) -> Int? {
+        let week: Int?
+        if let currentTeachingWeek {
+            if let teachingWeekObservedAt {
+                week = AcademicTeachingCalendar.weeks(from: teachingWeekObservedAt, to: date).map { currentTeachingWeek + $0 }
+            } else {
+                week = currentTeachingWeek
+            }
+        } else {
+            week = AcademicTeachingCalendar.publishedWeek(for: fields["xnxq01id"], on: date)
+        }
+        guard let week, week > 0, weeks.contains(where: { Int($0.value) == week }) else { return nil }
+        return week
+    }
+
+    public func lessons(inTeachingWeek week: Int) -> [AcademicLesson] {
+        lessons.filter { $0.weeks.contains(week) }
+    }
+}
+
+private enum AcademicTeachingCalendar {
+    static var shanghaiCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    static func weeks(from start: Date, to date: Date) -> Int? {
+        let calendar = shanghaiCalendar
+        guard let startMonday = calendar.dateInterval(of: .weekOfYear, for: start)?.start,
+              let endMonday = calendar.dateInterval(of: .weekOfYear, for: date)?.start,
+              let days = calendar.dateComponents([.day], from: startMonday, to: endMonday).day else { return nil }
+        return days / 7
+    }
+
+    static func publishedWeek(for term: String?, on date: Date) -> Int? {
+        // GZASC 2026–2027 published teaching calendar: https://www.gzasc.edu.cn/news/info/1003/52260.htm
+        let start: DateComponents
+        let count: Int
+        switch term {
+        case "2026-2027-1": start = DateComponents(year: 2026, month: 8, day: 31); count = 20
+        case "2026-2027-2": start = DateComponents(year: 2027, month: 3, day: 1); count = 19
+        default: return nil
+        }
+        guard let monday = shanghaiCalendar.date(from: start), let offset = weeks(from: monday, to: date),
+              (0..<count).contains(offset) else { return nil }
+        return offset + 1
     }
 }
 
@@ -132,8 +188,118 @@ public enum AcademicHTML {
         try schedulePage(html).schedule
     }
 
-    /// Full form controls are consumed only by the transport for an immediate query.
-    static func schedulePage(_ html: String) throws -> (schedule: AcademicSchedule, form: [String: String]) {
+    /// Recognizes the authenticated timetable page without interpreting its course rows.
+    static func confirmSchedulePage(_ html: String) throws {
+        try withPage(html) { page in
+            let tables = page.descendants { $0.name == "table" && $0["id"] == "kbtable" }
+            let filterNames = Set(page.descendants { $0.name == "select" || $0.name == "input" }.compactMap { $0["name"] })
+            guard tables.count == 1, filterNames.isSuperset(of: ["xnxq01id", "zc"]) else {
+                throw Error.unexpectedPage
+            }
+        }
+    }
+
+    struct ScheduleForm {
+        let controls: [URLQueryItem]
+        let filterIndices: [String: Int]
+        let selected: [String: String]
+        let terms: [AcademicOption]
+        let weeks: [AcademicOption]
+        let periodSchemeField: String?
+        let periodSchemes: [AcademicOption]
+        let action: String?
+        let method: String?
+        let allWeeksValue: String?
+        let currentTeachingWeek: Int?
+
+        var hasSelectedAllWeeks: Bool {
+            guard let allWeeksValue else { return false }
+            return selected["zc"] == allWeeksValue
+        }
+
+        func matches(_ selection: [String: String]) -> Bool {
+            selection.allSatisfy { selected[$0.key] == $0.value }
+        }
+
+        func numericWeeks() throws -> [(number: Int, option: AcademicOption)] {
+            let candidates = weeks.compactMap { option -> (number: Int, option: AcademicOption)? in
+                guard option.value.match(#"^[0-9]{1,2}$"#) != nil,
+                      let number = Int(option.value), (1...60).contains(number), option.value != allWeeksValue
+                else { return nil }
+                return (number, option)
+            }
+            guard Set(candidates.map(\.number)).count == candidates.count else { throw Error.unexpectedPage }
+            return candidates.sorted { $0.number < $1.number }
+        }
+    }
+
+    typealias TeachingWeekObservation = (number: Int, date: Date)
+
+    static func semesterSchedule(_ html: String, observation: TeachingWeekObservation?) throws -> AcademicSchedule {
+        try withScheduleForm(html) { table, form in
+            guard form.hasSelectedAllWeeks else { throw Error.unexpectedPage }
+            let (lessons, periods) = try timetable(table)
+            guard lessons.allSatisfy({ !$0.weeks.isEmpty }) else { throw Error.unexpectedPage }
+            let options = try form.numericWeeks().map(\.option)
+            return semesterSchedule(form, options: options, lessons: lessons, periods: periods, observation: observation)
+        }
+    }
+
+    static func combineScheduleWeeks(_ pages: [(week: Int, schedule: AcademicSchedule)], form: ScheduleForm,
+                                     options: [AcademicOption], observation: TeachingWeekObservation?) throws -> AcademicSchedule {
+        var orderedKeys: [AcademicLesson] = []
+        var lessonWeeks: [AcademicLesson: [Int]] = [:]
+        var periods: [Int: AcademicPeriod] = [:]
+        var conflictingPeriods: Set<Int> = []
+        for (week, schedule) in pages {
+            for lesson in schedule.lessons {
+                guard lesson.weeks.isEmpty || lesson.weeks.contains(week) else { throw Error.unexpectedPage }
+                let key = AcademicLesson(courseName: lesson.courseName, weekday: lesson.weekday,
+                    startPeriod: lesson.startPeriod, endPeriod: lesson.endPeriod, teacher: lesson.teacher, location: lesson.location)
+                if lessonWeeks[key] == nil { orderedKeys.append(key) }
+                if lessonWeeks[key]?.last != week { lessonWeeks[key, default: []].append(week) }
+            }
+            for period in schedule.periods {
+                if let previous = periods.updateValue(period, forKey: period.number), previous != period {
+                    conflictingPeriods.insert(period.number)
+                }
+            }
+        }
+        let lessons = orderedKeys.map { lesson in
+            AcademicLesson(courseName: lesson.courseName, weekday: lesson.weekday,
+                startPeriod: lesson.startPeriod, endPeriod: lesson.endPeriod, teacher: lesson.teacher, location: lesson.location,
+                weeks: lessonWeeks[lesson] ?? [])
+        }
+        let consistentPeriods = periods.values.filter { !conflictingPeriods.contains($0.number) }.sorted { $0.number < $1.number }
+        return semesterSchedule(form, options: options, lessons: lessons, periods: consistentPeriods, observation: observation)
+    }
+
+    private static func semesterSchedule(_ form: ScheduleForm, options: [AcademicOption], lessons: [AcademicLesson],
+                                         periods: [AcademicPeriod], observation: TeachingWeekObservation?) -> AcademicSchedule {
+        let availableWeeks = Set(options.compactMap { Int($0.value) })
+        let observed = observation.flatMap { availableWeeks.contains($0.number) ? $0 : nil }
+        return AcademicSchedule(terms: form.terms, weeks: options, fields: form.selected.filter { $0.key != "zc" },
+                                lessons: lessons, periods: periods, periodSchemeField: form.periodSchemeField,
+                                periodSchemes: form.periodSchemes, currentTeachingWeek: observed?.number,
+                                teachingWeekObservedAt: observed?.date)
+    }
+
+    /// Extracts controls for an immediate filtered query, even if the default grid cannot be parsed.
+    static func scheduleForm(_ html: String) throws -> ScheduleForm {
+        try withScheduleForm(html) { _, form in form }
+    }
+
+    static func schedulePage(_ html: String) throws -> (schedule: AcademicSchedule, form: [URLQueryItem], filterIndices: [String: Int]) {
+        try withScheduleForm(html) { table, form in
+            let (lessons, periods) = try timetable(table)
+            let schedule = AcademicSchedule(terms: form.terms, weeks: form.weeks, fields: form.selected,
+                                            lessons: lessons, periods: periods, periodSchemeField: form.periodSchemeField,
+                                            periodSchemes: form.periodSchemes)
+            return (schedule, form.controls, form.filterIndices)
+        }
+    }
+
+    private static func withScheduleForm<T>(_ html: String, extract: (HTMLNode, ScheduleForm) throws -> T) throws -> T {
         try withPage(html) { page in
             guard let table = page.descendants(where: { $0.name == "table" && $0["id"] == "kbtable" }).only,
                   let form = page.descendants(where: { $0.name == "form" }).filter({ form in
@@ -144,25 +310,49 @@ public enum AcademicHTML {
                   let week = form.formControls.filter({ $0.name == "select" && $0["name"] == "zc" }).only
             else { throw Error.unexpectedPage }
 
-            let fields = try form.successfulFields()
-            guard fields["xnxq01id"]?.isEmpty == false, fields["zc"] != nil else { throw Error.unexpectedPage }
-            let (lessons, periods) = try timetable(table)
-            let scheme = periodScheme(in: form, fields: fields)
+            let fields = form.successfulFields()
+            let scheme = periodScheme(in: form)
             let schemeName = scheme?["name"]
-            let selected = fields.filter { $0.key == "xnxq01id" || $0.key == "zc" || $0.key == schemeName }
-            let schedule = AcademicSchedule(terms: term.options, weeks: week.options, fields: selected,
-                                            lessons: lessons, periods: periods, periodSchemeField: schemeName,
-                                            periodSchemes: scheme?.options ?? [])
-            return (schedule, fields)
+            var selected: [String: String] = [:]
+            var filterIndices: [String: Int] = [:]
+            for filter in [term, week] + (scheme.map { [$0] } ?? []) {
+                let indices = fields.indices.filter { fields[$0].control.pointer == filter.pointer }
+                guard let index = indices.only, let value = fields[index].item.value else {
+                    throw Error.unexpectedPage
+                }
+                let name = fields[index].item.name
+                selected[name] = value
+                filterIndices[name] = index
+            }
+            guard selected["xnxq01id"]?.isEmpty == false else { throw Error.unexpectedPage }
+            let allLabels = ["全部", "整学期", "全学期", "全部周", "所有周", "全部周次", "所有周次", "全部教学周", "所有教学周"]
+            let weekOptions = week.optionNodes.filter { !$0.disabled }
+            let allValue = weekOptions.filter { allLabels.contains($0.option.label.filter { !$0.isWhitespace }) }.only?["value"]
+            let uniqueAllValue = allValue.flatMap { value in
+                weekOptions.filter { $0.option.value == value }.count == 1 ? value : nil
+            }
+            let markedWeek = weekOptions.map(\.option).compactMap { option -> Int? in
+                guard let value = Int(option.value), value > 0 else { return nil }
+                let label = option.label.filter { !$0.isWhitespace }
+                let suffix = label.match(#"^第?([0-9]{1,2})周[（(]当前(?:教学)?周[）)]$"#)?.first
+                let prefix = label.match(#"^当前(?:教学)?周[:：]?第?([0-9]{1,2})周$"#)?.first
+                guard (suffix ?? prefix).flatMap(Int.init) == value else { return nil }
+                return value
+            }.only
+            return try extract(table, ScheduleForm(controls: fields.map(\.item), filterIndices: filterIndices,
+                                                   selected: selected, terms: term.options, weeks: week.options,
+                                                   periodSchemeField: schemeName, periodSchemes: scheme?.options ?? [],
+                                                    action: form["action"], method: form["method"], allWeeksValue: uniqueAllValue,
+                                                    currentTeachingWeek: markedWeek))
         }
     }
 
-    private static func periodScheme(in form: HTMLNode, fields: [String: String]) -> HTMLNode? {
+    private static func periodScheme(in form: HTMLNode) -> HTMLNode? {
         let labels = form.descendants { $0.name == "label" }
         let titles = ["节次方案", "节次设置", "作息方案", "作息时间"]
         return form.formControls.filter { control in
             guard control.name == "select", let name = control["name"], name != "xnxq01id", name != "zc",
-                  fields[name] != nil, !control.options.isEmpty else { return false }
+                  !control.disabled, control["multiple"] == nil, control.selectedOption != nil else { return false }
             let identity = control["id"]
             let associated = labels.filter { label in
                 (identity != nil && label["for"] == identity)
@@ -197,21 +387,26 @@ public enum AcademicHTML {
            ["暂无课表", "暂无课程", "本周无课程", "本周没有课程"].contains(cell.node.text.normalizedMessage) {
             return ([], [])
         }
-        var periodByRow: [Int: Int] = [:]
+        var periodByRow: [Int: ClosedRange<Int>] = [:]
         var periods: [AcademicPeriod] = []
         var previousPeriod = 0
         for index in (headerRow + 1)..<grid.rows.count {
             let row = grid.rows[index]
+            if isSectionRow(row, at: index) { continue }
+            if index == grid.rows.count - 1, !periodByRow.isEmpty,
+               isTrailingNoteRow(row, at: index, periodColumn: firstDay - 1) { continue }
             guard let periodCell = row[firstDay - 1], periodCell.firstRow == index,
-                  let rawNumber = (periodCell.node.lines.first?.value ?? "").match(#"^(?:第\s*)?([0-9]{1,2})(?=\s|节|[（(]|$)"#)?.first,
-                  let number = Int(rawNumber), (1...32).contains(number), number > previousPeriod
+                  let range = periodRange(periodCell.node.lines.first?.value ?? ""),
+                  range.lowerBound > previousPeriod, range.upperBound <= 32
             else { throw Error.unexpectedPage }
-            previousPeriod = number
-            periodByRow[index] = number
-            if let times = periodCell.node.lines.map(\.value).joined(separator: " ").match(
+            previousPeriod = range.upperBound
+            periodByRow[index] = range
+            // A grouped row's time is the whole block, not the time of an individual period.
+            if range.lowerBound == range.upperBound,
+               let times = periodCell.node.lines.map(\.value).joined(separator: " ").match(
                 #"(?<![0-9])((?:[01]?[0-9]|2[0-3])[:：][0-5][0-9])\s*[-－–—~～至]\s*((?:[01]?[0-9]|2[0-3])[:：][0-5][0-9])(?![0-9])"#
             ) {
-                periods.append(AcademicPeriod(number: number,
+                periods.append(AcademicPeriod(number: range.lowerBound,
                     startTime: times[0].replacingOccurrences(of: "：", with: ":"),
                     endTime: times[1].replacingOccurrences(of: "：", with: ":")))
             }
@@ -225,10 +420,78 @@ public enum AcademicHTML {
                 guard let cell = grid.rows[index][firstDay + day - 1], cell.width == 1,
                       let endPeriod = periodByRow[cell.lastRow] else { throw Error.unexpectedPage }
                 guard cell.firstRow == index else { continue }
-                lessons += try parseLessons(cell.node, weekday: day, startPeriod: period, endPeriod: endPeriod)
+                lessons += try parseLessons(cell.node, weekday: day, startPeriod: period.lowerBound, endPeriod: endPeriod.upperBound)
             }
         }
         return (lessons, periods)
+    }
+
+    private static func isSectionRow(_ row: [Int: TimetableGrid.Cell], at index: Int) -> Bool {
+        let cells = row.filter { $0.key == $0.value.firstColumn }.values
+        guard !cells.isEmpty, cells.allSatisfy({ $0.firstRow == index && $0.lastRow == index }) else { return false }
+        let labels = cells.flatMap { $0.node.lines.map(\.value) }.filter { !$0.isEmpty }
+        guard let label = labels.only else { return false }
+        return ["上午", "中午", "下午", "晚上", "晚间"].contains(label.trimmingCharacters(in: CharacterSet(charactersIn: ":： ")))
+    }
+
+    private static func isTrailingNoteRow(_ row: [Int: TimetableGrid.Cell], at index: Int, periodColumn: Int) -> Bool {
+        guard let heading = row[periodColumn], heading.firstColumn == periodColumn,
+              let label = heading.node.lines.only?.value,
+              label.match(#"^[\p{Han}]{1,6}\s*[:：]$"#) != nil else { return false }
+        guard row.values.allSatisfy({ $0.firstRow == index && $0.lastRow == index }) else { return false }
+        if row.values.allSatisfy({ $0.firstColumn == periodColumn || $0.node.lines.isEmpty }) { return true }
+
+        let title = label.trimmingCharacters(in: CharacterSet(charactersIn: ":： "))
+        guard ["备注", "注", "说明"].contains(title), heading.width == 1,
+              let body = row[periodColumn + 1], body.firstColumn == periodColumn + 1, body.width == 7,
+              row.keys.allSatisfy({ (periodColumn...(periodColumn + 7)).contains($0) }) else { return false }
+        return body.node.descendants { node in
+            node.name == "table" || node.classes.contains("kbcontent") || node.classes.contains("kbcontent1")
+        }.isEmpty
+    }
+
+    private static func periodRange(_ label: String) -> ClosedRange<Int>? {
+        let label = label.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? label
+        if let bounds = label.match(#"^(?:第\s*)?([0-9]{1,2})\s*[-－–—~～至]\s*([0-9]{1,2})\s*节"#),
+           let start = Int(bounds[0]), let end = Int(bounds[1]), start > 0, end >= start {
+            return start...end
+        }
+        if let digits = label.match(#"^(?:第\s*)?([0-9]{1,2})(?=\s|节|[（(]|$)"#)?.first,
+           let number = Int(digits), number > 0 {
+            return number...number
+        }
+        guard let ordinal = label.match(#"^第\s*([一二三四五六七八九十]+(?:\s*[-－–—~～至、，,]\s*[一二三四五六七八九十]+)?)\s*节"#)?.first else { return nil }
+        let parts = ordinal.components(separatedBy: CharacterSet(charactersIn: "-－–—~～至、，,")).map { $0.collapsedWhitespace }
+        if parts.count == 2, let start = chinesePeriod(parts[0]), let end = chinesePeriod(parts[1]), end >= start {
+            return start...end
+        }
+        if let number = chinesePeriod(ordinal) { return number...number }
+        // StrongQZ concatenates consecutive ordinals, including 第九十十一节.
+        for start in 1..<chinesePeriodLabels.count {
+            var remaining = ordinal[...]
+            for end in start..<chinesePeriodLabels.count {
+                let token = chinesePeriodLabels[end]
+                guard remaining.hasPrefix(token) else { break }
+                remaining = remaining.dropFirst(token.count)
+                if remaining.isEmpty { return start...end }
+            }
+        }
+        return nil
+    }
+
+    private static let chinesePeriodLabels: [String] = {
+        let digits = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+        return (0...32).map { number in
+            let ones = digits[number % 10]
+            if number < 10 { return ones }
+            let tens = number < 20 ? "" : digits[number / 10]
+            return tens + "十" + ones
+        }
+    }()
+
+    private static func chinesePeriod(_ ordinal: String) -> Int? {
+        guard !ordinal.isEmpty else { return nil }
+        return chinesePeriodLabels.firstIndex(of: ordinal)
     }
 
     private static func parseLessons(_ cell: HTMLNode, weekday: Int, startPeriod: Int, endPeriod: Int) throws -> [AcademicLesson] {
@@ -472,6 +735,7 @@ private struct TimetableGrid {
     struct Cell {
         let node: HTMLNode
         let width: Int
+        let firstColumn: Int
         let firstRow: Int
         let lastRow: Int
     }
@@ -488,7 +752,7 @@ private struct TimetableGrid {
                 let height = Int(node["rowspan"] ?? "1") ?? 0
                 guard column < 32, (1...(32 - column)).contains(width),
                       (1...(rows.count - index)).contains(height) else { throw AcademicHTML.Error.unexpectedPage }
-                let cell = Cell(node: node, width: width, firstRow: index, lastRow: index + height - 1)
+                let cell = Cell(node: node, width: width, firstColumn: column, firstRow: index, lastRow: index + height - 1)
                 for coveredRow in index...cell.lastRow {
                     for coveredColumn in column..<(column + width) {
                         guard rows[coveredRow].updateValue(cell, forKey: coveredColumn) == nil else {
@@ -674,17 +938,18 @@ private struct HTMLNode {
         return options.first
     }
 
-    func successfulFields() throws -> [String: String] {
-        var result: [String: String] = [:]
+    func successfulFields() -> [(control: HTMLNode, item: URLQueryItem)] {
+        var result: [(control: HTMLNode, item: URLQueryItem)] = []
         for control in formControls where !control.disabled {
             guard let name = control["name"], !name.isEmpty else { continue }
             let value: String?
             switch control.name {
             case "select":
                 if control["multiple"] != nil {
-                    let selected = control.optionNodes.filter { !$0.disabled && $0["selected"] != nil }
-                    guard selected.count <= 1 else { throw AcademicHTML.Error.unexpectedPage }
-                    value = selected.first?.option.value
+                    for option in control.optionNodes where !option.disabled && option["selected"] != nil {
+                        result.append((control, URLQueryItem(name: name, value: option.option.value)))
+                    }
+                    continue
                 } else {
                     value = control.selectedOption?.value
                 }
@@ -698,7 +963,7 @@ private struct HTMLNode {
                 }
             }
             if let value {
-                guard result.updateValue(value, forKey: name) == nil else { throw AcademicHTML.Error.unexpectedPage }
+                result.append((control, URLQueryItem(name: name, value: value)))
             }
         }
         return result

@@ -22,12 +22,15 @@ public enum AcademicContent: Sendable, Codable {
         }
     }
 
-    init(endpoint: AcademicEndpoint, html: String) throws {
+    init(endpoint: AcademicEndpoint, page: AcademicPage) throws {
         switch endpoint {
-        case .schedule: self = .schedule(try AcademicHTML.schedule(html))
-        case .grades: self = .grades(try AcademicHTML.grades(html))
-        case .exams: self = .exams(try AcademicHTML.exams(html))
-        case .plan: self = .plan(try AcademicHTML.plan(html))
+        case .schedule: self = .schedule(try AcademicHTML.schedule(page.html))
+        case .semesterSchedule:
+            guard let schedule = page.semesterSchedule else { throw AcademicHTML.Error.unexpectedPage }
+            self = .schedule(schedule)
+        case .grades: self = .grades(try AcademicHTML.grades(page.html))
+        case .exams: self = .exams(try AcademicHTML.exams(page.html))
+        case .plan: self = .plan(try AcademicHTML.plan(page.html))
         }
     }
 }
@@ -37,17 +40,19 @@ public struct AcademicDataResult: Sendable {
     public let updatedAt: Date
     public let isCached: Bool
     public let needsAuthorization: Bool
+    public let syncFailed: Bool
 
-    public init(content: AcademicContent, updatedAt: Date, isCached: Bool, needsAuthorization: Bool = false) {
+    public init(content: AcademicContent, updatedAt: Date, isCached: Bool, needsAuthorization: Bool = false, syncFailed: Bool = false) {
         self.content = content
         self.updatedAt = updatedAt
         self.isCached = isCached
         self.needsAuthorization = needsAuthorization
+        self.syncFailed = syncFailed
     }
 }
 
 public protocol AcademicSessionCoordinator: SessionCoordinator {
-    func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String?) async throws -> AcademicDataResult
+    func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String?, forceRefresh: Bool) async throws -> AcademicDataResult
 }
 
 protocol AcademicPageProvider: Provider {

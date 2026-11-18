@@ -3,8 +3,43 @@ import Foundation
 import Testing
 
 @Suite struct AcademicHTMLTests {
+    @Test func cachedTeachingWeekAdvancesOnShanghaiMondayAndKeepsOnlyItsLessons() throws {
+        let shanghaiSunday = Date(timeIntervalSince1970: 1_794_758_399) // 2026-11-15 23:59:59 in Shanghai
+        let monday = shanghaiSunday.addingTimeInterval(1)
+        let weeks = [10, 11, 12].map { AcademicOption(value: String($0), label: "第\($0)周") }
+        let schedule = AcademicSchedule(terms: [], weeks: weeks, fields: ["xnxq01id": "synthetic"], lessons: [
+            AcademicLesson(courseName: "单周课程", weekday: 1, startPeriod: 1, endPeriod: 2, weeks: [11]),
+            AcademicLesson(courseName: "后续课程", weekday: 1, startPeriod: 1, endPeriod: 2, weeks: [12]),
+        ], currentTeachingWeek: 11, teachingWeekObservedAt: shanghaiSunday)
+        let cached = try JSONDecoder().decode(AcademicSchedule.self, from: JSONEncoder().encode(schedule))
+        #expect(cached.currentTeachingWeek == 11)
+        #expect(cached.teachingWeek(on: shanghaiSunday) == 11)
+        #expect(cached.teachingWeek(on: monday) == 12)
+        #expect(cached.teachingWeek(on: monday.addingTimeInterval(7 * 86_400)) == nil)
+        #expect(cached.lessons(inTeachingWeek: 12).map(\.courseName) == ["后续课程"])
+    }
+
+    @Test func teachingWeekUsesExactPublishedTeachingIntervalsAndDecodesOldCache() throws {
+        let legacy = Data(#"{"terms":[],"weeks":[{"value":"3","label":"第3周"}],"fields":{"zc":"3"},"lessons":[],"periods":[],"periodSchemes":[]}"#.utf8)
+        let old = try JSONDecoder().decode(AcademicSchedule.self, from: legacy)
+        #expect(old.currentTeachingWeek == nil)
+        #expect(old.teachingWeek() == nil)
+        let fallStart = Date(timeIntervalSince1970: 1_788_105_600) // 2026-08-31 00:00 in Shanghai
+        let springStart = Date(timeIntervalSince1970: 1_803_830_400) // 2027-03-01 00:00 in Shanghai
+        let weeks = (1...20).map { AcademicOption(value: String($0), label: "第\($0)周") }
+        let fall = AcademicSchedule(terms: [], weeks: weeks, fields: ["xnxq01id": "2026-2027-1"], lessons: [])
+        let spring = AcademicSchedule(terms: [], weeks: weeks, fields: ["xnxq01id": "2026-2027-2"], lessons: [])
+        #expect(fall.teachingWeek(on: fallStart.addingTimeInterval(-1)) == nil)
+        #expect(fall.teachingWeek(on: fallStart) == 1)
+        #expect(fall.teachingWeek(on: fallStart.addingTimeInterval(19 * 7 * 86_400)) == 20)
+        #expect(fall.teachingWeek(on: fallStart.addingTimeInterval(20 * 7 * 86_400)) == nil)
+        #expect(spring.teachingWeek(on: springStart) == 1)
+        #expect(spring.teachingWeek(on: springStart.addingTimeInterval(18 * 7 * 86_400)) == 19)
+        #expect(spring.teachingWeek(on: springStart.addingTimeInterval(19 * 7 * 86_400)) == nil)
+    }
+
     @Test func scheduleUsesSelectedTermAndSuccessfulControlsFromTheScheduleForm() throws {
-        let (schedule, form) = try AcademicHTML.schedulePage("""
+        let (schedule, form, _) = try AcademicHTML.schedulePage("""
             <form><input name="unrelated" value="ignored"></form>
             <FORM id=query>
               <select name=xnxq01id>
@@ -29,7 +64,10 @@ import Testing
         #expect(schedule.weeks == [AcademicOption(value: "3", label: "第3周")])
         #expect(schedule.fields == ["xnxq01id": "synthetic-current", "zc": "3"])
         #expect(form == [
-            "xnxq01id": "synthetic-current", "zc": "3", "jcfangan": "period&plan", "display": "detail",
+            URLQueryItem(name: "xnxq01id", value: "synthetic-current"),
+            URLQueryItem(name: "zc", value: "3"),
+            URLQueryItem(name: "jcfangan", value: "period&plan"),
+            URLQueryItem(name: "display", value: "detail"),
         ])
     }
 
@@ -61,6 +99,101 @@ import Testing
         ] {
             #expect(throws: AcademicHTML.Error.unexpectedPage) { try AcademicHTML.schedule(Self.scheduleForm + html) }
         }
+    }
+
+    @Test func timetableReadsGroupedChinesePeriodsAndSkipsSectionLabels() throws {
+        let schedule = try AcademicHTML.schedule(Self.scheduleForm + """
+            <table id=kbtable>\(Self.weekdayHeader)
+            <tr><th colspan=8>上午：</th></tr>
+            <tr><th>第一二节<br>08:05—09:50</th>
+                <td><div class=kbcontent>合成课程甲</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            <tr><th>第三四节</th>
+                \(String(repeating: "<td></td>", count: 6))
+                <td><div class=kbcontent>合成课程乙</div></td></tr>
+            <tr><th>第九十节</th>
+                <td><div class=kbcontent>合成课程丙</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            </table>
+            """)
+        #expect(schedule.lessons.map(\.startPeriod) == [1, 3, 9])
+        #expect(schedule.lessons.map(\.endPeriod) == [2, 4, 10])
+        #expect(schedule.lessons.map(\.weekday) == [1, 7, 1])
+        #expect(schedule.periods.isEmpty)
+    }
+
+    @Test func timetableReadsThreeConsecutiveChinesePeriods() throws {
+        let schedule = try AcademicHTML.schedule(Self.scheduleForm + """
+            <table id=kbtable>\(Self.weekdayHeader)
+            <tr><th>第九十十一节</th>
+                <td><div class=kbcontent>合成晚间课程</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            </table>
+            """)
+        #expect(schedule.lessons.map(\.startPeriod) == [9])
+        #expect(schedule.lessons.map(\.endPeriod) == [11])
+    }
+
+    @Test func timetableSkipsTrailingNoteRowWithoutDiscardingUnrecognizedCourseRows() throws {
+        let closing = String(repeating: "<td>&nbsp;</td>", count: 7)
+        let footer = "<tr><td>注：</td>\(closing)</tr>"
+        let schedule = try AcademicHTML.schedule(Self.scheduleForm + """
+            <table id=kbtable>\(Self.weekdayHeader)
+            <tr><th>第一节</th><td><div class=kbcontent>合成课程</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            \(footer)</table>
+            """)
+        #expect(schedule.lessons.map(\.courseName) == ["合成课程"])
+
+        #expect(throws: AcademicHTML.Error.unexpectedPage) {
+            try AcademicHTML.schedule(Self.scheduleForm + """
+                <table id=kbtable>\(Self.weekdayHeader)
+                <tr><th>第一节</th>\(closing)</tr>
+                <tr><td>注：</td><td><div class=kbcontent>另一个合成课程</div></td>
+                    \(String(repeating: "<td></td>", count: 6))</tr></table>
+                """)
+        }
+    }
+
+    @Test func timetableReadsRecognizedFooterWithTextAcrossSevenDays() throws {
+        let grid = """
+            <table id=kbtable>\(Self.weekdayHeader)
+            <tr><th>第九十十一节<br>18:00-20:30</th>
+                <td><div class=kbcontent1>合成课程</div>
+                <div class=kbcontent>合成课程<br><font title="老师">合成教师</font><br>
+                    <font title="周次(节次)">2-4,6(周)[09-10-11节]</font><br>
+                    <font title="教室">合成教室</font></div></td>
+                \(String(repeating: "<td><div class=kbcontent1>&nbsp;</div><div class=kbcontent>&nbsp;</div></td>", count: 6))</tr>
+            """
+        let schedule = try AcademicHTML.schedule(Self.scheduleForm + grid + """
+            <tr><th>备注:</th><td colspan="7">合成说明 2-6周</td></tr></table>
+            """)
+        #expect(schedule.lessons.map(\.courseName) == ["合成课程"])
+        #expect(schedule.lessons.map(\.startPeriod) == [9])
+        #expect(schedule.lessons.map(\.endPeriod) == [11])
+        #expect(schedule.lessons.map(\.weeks) == [[2, 3, 4, 6]])
+
+        #expect(throws: AcademicHTML.Error.unexpectedPage) {
+            try AcademicHTML.schedule(Self.scheduleForm + grid + """
+                <tr><th>备注:</th><td colspan="7"><div class=kbcontent>潜在课程内容</div></td></tr></table>
+                """)
+        }
+    }
+
+    @Test func timetableReadsChinesePeriodLabels() throws {
+        let schedule = try AcademicHTML.schedule(Self.scheduleForm + """
+            <table id=kbtable>\(Self.weekdayHeader)
+            <tr><th>第一节<br>08:05—08:50</th>
+                <td><div class=kbcontent>合成课程甲</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            <tr><th>第十一节</th>
+                <td><div class=kbcontent>合成课程乙</div></td>
+                \(String(repeating: "<td></td>", count: 6))</tr>
+            </table>
+            """)
+        #expect(schedule.lessons.map(\.startPeriod) == [1, 11])
+        #expect(schedule.lessons.map(\.endPeriod) == [1, 11])
+        #expect(schedule.periods == [AcademicPeriod(number: 1, startTime: "08:05", endTime: "08:50")])
     }
 
     @Test func timetablePreservesWeekdaysAndSeparateTeacherWeekSegments() throws {

@@ -64,7 +64,7 @@ enum CampusTheme {
     static let soft = adaptive(0xE7EEE4, 0x29392F)
     static let line = adaptive(0xE2E7DD, 0x37443A)
 
-    private static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
+    static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
             let rgb = traits.userInterfaceStyle == .dark ? dark : light
             return UIColor(

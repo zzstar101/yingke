@@ -244,15 +244,23 @@ struct PlatformDetailView: View {
     }
 }
 
-private struct BoundAcademicDataView: View {
+struct BoundAcademicDataView: View {
     let endpoint: AcademicEndpoint
     let bindingID: String
     let model: AccountsModel
 
     var body: some View {
         if model.snapshot(for: .academic)?.bindingID == bindingID {
-            AcademicDataView(endpoint: endpoint) { endpoint, fields in
-                try await model.academicData(endpoint, fields: fields, bindingID: bindingID)
+            Group {
+                if endpoint == .schedule || endpoint == .semesterSchedule {
+                    SemesterTimetableView { fields, forceRefresh in
+                        try await model.academicData(.semesterSchedule, fields: fields, bindingID: bindingID, forceRefresh: forceRefresh)
+                    }
+                } else {
+                    AcademicDataView(endpoint: endpoint) { endpoint, fields, forceRefresh in
+                        try await model.academicData(endpoint, fields: fields, bindingID: bindingID, forceRefresh: forceRefresh)
+                    }
+                }
             }
             .id(bindingID)
         } else {

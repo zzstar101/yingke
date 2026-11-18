@@ -53,14 +53,14 @@ final class AccountsModel {
         await reload()
     }
 
-    func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String) async throws -> AcademicDataResult {
+    func academicData(_ endpoint: AcademicEndpoint, fields: [String: String]?, bindingID: String, forceRefresh: Bool) async throws -> AcademicDataResult {
         guard snapshot(for: .academic)?.bindingID == bindingID else { throw SessionFailure.superseded }
         guard let coordinator = try localCoordinator() as? any AcademicSessionCoordinator else {
             throw SessionFailure.unsupported
         }
         let result: AcademicDataResult
         do {
-            result = try await coordinator.academicData(endpoint, fields: fields, bindingID: bindingID)
+            result = try await coordinator.academicData(endpoint, fields: fields, bindingID: bindingID, forceRefresh: forceRefresh)
         } catch {
             await reload()
             throw error

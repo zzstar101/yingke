@@ -1,11 +1,11 @@
 import Foundation
 
 public enum AcademicEndpoint: Sendable {
-    case schedule, grades, exams, plan
+    case schedule, semesterSchedule, grades, exams, plan
 
     fileprivate var path: String {
         switch self {
-        case .schedule: "xskb/xskb_list.do"
+        case .schedule, .semesterSchedule: "xskb/xskb_list.do"
         case .grades: "kscj/cjcx_list"
         case .exams: "xsks/xsksap_list"
         case .plan: "pyfa/pyfa_query"
@@ -28,6 +28,14 @@ public struct AcademicAuthorization: ProviderAuthorization, CustomReflectable {
 public struct AcademicPage: Sendable, CustomReflectable {
     public let html: String
     public let session: ProviderSession
+    /// The validated term-wide result for `.semesterSchedule`. Its HTML can be one source page of a batch.
+    public let semesterSchedule: AcademicSchedule?
+
+    init(html: String, session: ProviderSession, semesterSchedule: AcademicSchedule? = nil) {
+        self.html = html
+        self.session = session
+        self.semesterSchedule = semesterSchedule
+    }
 
     public var customMirror: Mirror { Mirror(self, children: [:]) }
 }
@@ -95,29 +103,36 @@ public struct AcademicProvider: Provider {
     public func page(_ endpoint: AcademicEndpoint, session: ProviderSession, fields: [String: String]? = nil) async throws -> AcademicPage {
         let jar = try AcademicCookies(session: session)
         let endpointURL = Self.loginURL.appending(path: endpoint.path)
+        if endpoint == .semesterSchedule {
+            return try await semesterSchedule(at: endpointURL, fields: fields ?? [:], jar: jar, accountID: session.remoteUserID)
+        }
         var url = endpointURL
         var form: Data?
         if let fields {
             if endpoint == .schedule {
                 let prefetch = try await load(endpointURL, referer: Self.activationURL, jar: jar)
-                guard let live = try? AcademicHTML.schedulePage(prefetch) else {
+                guard let live = try? AcademicHTML.scheduleForm(prefetch) else {
                     // Let the coordinator classify the schema error and keep any cached result.
                     return AcademicPage(html: prefetch, session: try jar.session(for: session.remoteUserID))
                 }
-                var controls = live.form
-                if let term = fields["xnxq01id"], live.schedule.terms.contains(where: { $0.value == term }) {
-                    controls["xnxq01id"] = term
+                var controls = live.controls
+                if let term = fields["xnxq01id"], let index = live.filterIndices["xnxq01id"],
+                   live.terms.contains(where: { $0.value == term }) {
+                    controls[index].value = term
                 }
                 // A requested term may have different week options from the prefetched term.
-                if let week = fields["zc"] { controls["zc"] = week }
-                if let name = live.schedule.periodSchemeField, let scheme = fields[name],
-                   live.schedule.periodSchemes.contains(where: { $0.value == scheme }) {
-                    controls[name] = scheme
+                if let week = fields["zc"], let index = live.filterIndices["zc"] {
+                    controls[index].value = week
+                }
+                if let name = live.periodSchemeField, let scheme = fields[name], let index = live.filterIndices[name],
+                   live.periodSchemes.contains(where: { $0.value == scheme }) {
+                    controls[index].value = scheme
                 }
                 form = Data(Self.encode(controls, form: true).utf8)
             } else if !fields.isEmpty {
                 var parts = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)!
-                parts.percentEncodedQuery = Self.encode(fields, form: false)
+                let filters = fields.keys.sorted().map { URLQueryItem(name: $0, value: fields[$0]) }
+                parts.percentEncodedQuery = Self.encode(filters, form: false)
                 guard let filtered = parts.url else { throw ProviderFailure.temporarilyUnavailable }
                 url = filtered
             }
@@ -126,13 +141,88 @@ public struct AcademicProvider: Provider {
         return AcademicPage(html: html, session: try jar.session(for: session.remoteUserID))
     }
 
-    private static func encode(_ fields: [String: String], form: Bool) -> String {
+    private func semesterSchedule(at url: URL, fields: [String: String], jar: AcademicCookies, accountID: String) async throws -> AcademicPage {
+        var html = try await load(url, referer: Self.activationURL, jar: jar)
+        var form = try AcademicHTML.scheduleForm(html)
+        let selection = form.selected.filter { $0.key != "zc" }.merging(fields) { _, value in value }
+        // The initial page can identify a current week for its term, independently of its selected filter.
+        let observation: AcademicHTML.TeachingWeekObservation? = form.selected["xnxq01id"] == selection["xnxq01id"]
+            ? form.currentTeachingWeek.map { ($0, .now) } : nil
+        let allowedFields = Set(["xnxq01id"] + (form.periodSchemeField.map { [$0] } ?? []))
+        guard Set(fields.keys).isSubset(of: allowedFields),
+              form.terms.contains(where: { $0.value == selection["xnxq01id"] }),
+              form.periodSchemeField.map({ name in form.periodSchemes.contains { $0.value == selection[name] } }) ?? true
+        else { throw AcademicHTML.Error.unexpectedPage }
+
+        var requestedAll = false
+        if let allWeeks = form.allWeeksValue, !form.hasSelectedAllWeeks || !form.matches(selection) {
+            html = try await submitSchedule(form, selecting: selection.merging(["zc": allWeeks]) { _, value in value }, at: url, jar: jar)
+            form = try AcademicHTML.scheduleForm(html)
+            requestedAll = true
+        } else if !form.matches(selection) {
+            html = try await submitSchedule(form, selecting: selection, at: url, jar: jar)
+            form = try AcademicHTML.scheduleForm(html)
+        }
+        guard form.matches(selection) else { throw AcademicHTML.Error.unexpectedPage }
+
+        if let allWeeks = form.allWeeksValue, !form.hasSelectedAllWeeks {
+            guard !requestedAll else { throw AcademicHTML.Error.unexpectedPage }
+            html = try await submitSchedule(form, selecting: ["zc": allWeeks], at: url, jar: jar)
+            form = try AcademicHTML.scheduleForm(html)
+            guard form.matches(selection), form.hasSelectedAllWeeks else { throw AcademicHTML.Error.unexpectedPage }
+        }
+        if form.hasSelectedAllWeeks {
+            let term = try AcademicHTML.semesterSchedule(html, observation: observation)
+            return AcademicPage(html: html, session: try jar.session(for: accountID), semesterSchedule: term)
+        }
+
+        let weeks = try form.numericWeeks()
+        guard !weeks.isEmpty else { throw AcademicHTML.Error.unexpectedPage }
+        let options = weeks.map(\.option)
+        let batchSelection = form.selected.filter { $0.key != "zc" }
+        let first = try? AcademicHTML.schedule(html)
+        let alreadyLoaded = form.selected["zc"]
+        var pages: [(week: Int, schedule: AcademicSchedule)] = []
+        for (week, option) in weeks {
+            try Task.checkCancellation()
+            let value = option.value
+            if value == alreadyLoaded, let first {
+                pages.append((week, first))
+            } else {
+                html = try await submitSchedule(form, selecting: ["zc": value], at: url, jar: jar)
+                form = try AcademicHTML.scheduleForm(html)
+                guard form.matches(batchSelection), form.selected["zc"] == value,
+                      try form.numericWeeks().map(\.option.value) == options.map(\.value)
+                else { throw AcademicHTML.Error.unexpectedPage }
+                pages.append((week, try AcademicHTML.schedule(html)))
+            }
+        }
+        let term = try AcademicHTML.combineScheduleWeeks(pages, form: form, options: options, observation: observation)
+        return AcademicPage(html: html, session: try jar.session(for: accountID), semesterSchedule: term)
+    }
+
+    private func submitSchedule(_ form: AcademicHTML.ScheduleForm, selecting selection: [String: String], at url: URL, jar: AcademicCookies) async throws -> String {
+        let action = form.action?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let method = form.method?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        // The StrongQZ timetable query is documented as a POST to its read-only path.
+        guard let target = action.isEmpty ? url : URL(string: action, relativeTo: url)?.absoluteURL,
+              Self.permits(target), target.path == url.path, target.fragment == nil,
+              method.isEmpty || method == "post" else { throw AcademicHTML.Error.unexpectedPage }
+        var controls = form.controls
+        for (name, value) in selection {
+            guard let index = form.filterIndices[name] else { throw AcademicHTML.Error.unexpectedPage }
+            controls[index].value = value
+        }
+        return try await load(target, referer: url, jar: jar, form: Data(Self.encode(controls, form: true).utf8))
+    }
+
+    private static func encode(_ fields: [URLQueryItem], form: Bool) -> String {
         let allowed = CharacterSet(charactersIn: form ? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789*-._" : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         func escaped(_ value: String) -> String {
             let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed)!
             return form ? encoded.replacingOccurrences(of: "%20", with: "+") : encoded
         }
-        return fields.sorted { $0.key < $1.key }.map { "\(escaped($0.key))=\(escaped($0.value))" }.joined(separator: "&")
+        return fields.map { "\(escaped($0.name))=\(escaped($0.value ?? ""))" }.joined(separator: "&")
     }
 
     private func load(_ initialURL: URL, referer: URL, jar: AcademicCookies, form: Data? = nil) async throws -> String {
@@ -211,7 +301,7 @@ public struct AcademicProvider: Provider {
 
     private static func validateSchedule(_ html: String) throws {
         do {
-            _ = try AcademicHTML.schedule(html)
+            try AcademicHTML.confirmSchedulePage(html)
         } catch {
             throw ProviderFailure.temporarilyUnavailable
         }

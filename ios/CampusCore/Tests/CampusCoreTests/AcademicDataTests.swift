@@ -3,6 +3,126 @@ import Foundation
 import Testing
 
 @Suite struct AcademicDataTests {
+    @Test func reopeningAnAcademicQueryUsesCacheBeforeTouchingTheProvider() async throws {
+        let fixture = try AcademicFixture()
+        defer { fixture.removeFiles() }
+        let core = fixture.coordinator
+        try await core.connect(.academic, using: AcademicFixture.Authorization())
+        let week = ["xnxq01id": "sample", "zc": "3"]
+
+        let fresh = try await core.academicData(.schedule, fields: week)
+        await fixture.provider.setFailure(.temporarilyUnavailable)
+        let reopened = try await core.academicData(.schedule, fields: week)
+
+        #expect(reopened.isCached)
+        #expect(reopened.updatedAt == fresh.updatedAt)
+        #expect(await fixture.provider.requestCount == 1)
+    }
+
+    @Test func returningToTheExactDefaultTimetableSelectionUsesItsCache() async throws {
+        let fixture = try AcademicFixture()
+        defer { fixture.removeFiles() }
+        let core = fixture.coordinator
+        try await core.connect(.academic, using: AcademicFixture.Authorization())
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a"))
+        let defaultPage = try await core.academicData(.schedule, fields: nil)
+        let week3 = ["xnxq01id": "sample", "zc": "3", "scheme": "a"]
+        let week4 = ["xnxq01id": "sample", "zc": "4", "scheme": "a"]
+
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(week: "4", periodScheme: "a"))
+        let otherWeek = try await core.academicData(.schedule, fields: week4)
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a"))
+        let returned = try await core.academicData(.schedule, fields: week3)
+
+        #expect(!otherWeek.isCached)
+        #expect(returned.isCached)
+        #expect(returned.updatedAt == defaultPage.updatedAt)
+        guard case let .schedule(schedule) = returned.content else { Issue.record("Expected a schedule"); return }
+        #expect(schedule.fields == week3)
+        #expect(await fixture.provider.requestCount == 2)
+    }
+
+    @Test func reopeningDefaultTimetableUsesTheLatestExactSelectionSync() async throws {
+        let fixture = try AcademicFixture()
+        defer { fixture.removeFiles() }
+        let core = fixture.coordinator
+        try await core.connect(.academic, using: AcademicFixture.Authorization())
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a"))
+        _ = try await core.academicData(.schedule, fields: nil)
+
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a", course: "更新课程"))
+        let week = ["xnxq01id": "sample", "zc": "3", "scheme": "a"]
+        let synced = try await core.academicData(.schedule, fields: week, forceRefresh: true)
+        let reopened = try await core.academicData(.schedule, fields: nil)
+
+        #expect(!synced.isCached)
+        #expect(reopened.isCached)
+        #expect(reopened.updatedAt == synced.updatedAt)
+        guard case let .schedule(schedule) = reopened.content else { Issue.record("Expected a schedule"); return }
+        #expect(schedule.lessons.first?.courseName == "更新课程")
+        #expect(await fixture.provider.requestCount == 2)
+    }
+
+    @Test func semesterCacheUsesOnlyCompleteResultsAndSharesTheLatestExactSelection() async throws {
+        let fixture = try AcademicFixture()
+        defer { fixture.removeFiles() }
+        let core = fixture.coordinator
+        try await core.connect(.academic, using: AcademicFixture.Authorization())
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a"))
+        _ = try await core.academicData(.schedule, fields: nil)
+        await #expect(throws: AcademicHTML.Error.unexpectedPage) {
+            _ = try await core.academicData(.semesterSchedule, fields: nil)
+        }
+
+        let selection = ["xnxq01id": "sample", "scheme": "a"]
+        let weeks = [3, 4].map { AcademicOption(value: String($0), label: "第\($0)周") }
+        let complete = AcademicSchedule(terms: [], weeks: weeks, fields: selection, lessons: [
+            AcademicLesson(courseName: "整学期课程", weekday: 1, startPeriod: 1, endPeriod: 2, weeks: [3, 4]),
+        ])
+        await fixture.provider.setSemesterSchedule(complete)
+        let fresh = try await core.academicData(.semesterSchedule, fields: nil)
+        let exact = try await core.academicData(.semesterSchedule, fields: selection)
+        #expect(exact.isCached)
+        #expect(exact.updatedAt == fresh.updatedAt)
+        guard case .schedule(let term) = exact.content else { Issue.record("Expected a complete term"); return }
+        #expect(term == complete)
+
+        let refreshed = AcademicSchedule(terms: [], weeks: weeks, fields: selection, lessons: [])
+        await fixture.provider.setSemesterSchedule(refreshed)
+        let synced = try await core.academicData(.semesterSchedule, fields: selection, forceRefresh: true)
+        await fixture.provider.setSemesterSchemaFailure()
+        let fallback = try await core.academicData(.semesterSchedule, fields: nil, forceRefresh: true)
+        #expect(fallback.isCached && fallback.syncFailed)
+        #expect(fallback.updatedAt == synced.updatedAt)
+        guard case .schedule(let cached) = fallback.content else { Issue.record("Expected the latest cached term"); return }
+        #expect(cached == refreshed)
+        #expect(await fixture.provider.requestCount == 5)
+    }
+
+    @Test func expiredSessionOnlyReusesTheExactDefaultSelection() async throws {
+        let fixture = try AcademicFixture()
+        defer { fixture.removeFiles() }
+        let core = fixture.coordinator
+        try await core.connect(.academic, using: AcademicFixture.Authorization())
+        await fixture.provider.setHTML(TestAcademicPageProvider.scheduleHTML(periodScheme: "a"))
+        let defaultPage = try await core.academicData(.schedule, fields: nil)
+        let matching = ["xnxq01id": "sample", "zc": "3", "scheme": "a"]
+
+        await fixture.provider.setFailure(.expired)
+        let fallback = try await core.academicData(.schedule, fields: matching, forceRefresh: true)
+
+        #expect(fallback.isCached)
+        #expect(fallback.syncFailed)
+        #expect(fallback.needsAuthorization)
+        #expect(fallback.updatedAt == defaultPage.updatedAt)
+        for fields in [["xnxq01id": "sample", "zc": "3", "scheme": "b"], ["xnxq01id": "sample", "zc": "3"]] {
+            await #expect(throws: ProviderFailure.actionRequired) {
+                _ = try await core.academicData(.schedule, fields: fields)
+            }
+        }
+        #expect(await fixture.provider.requestCount == 2)
+    }
+
     @Test func malformedResponseAndExpiryKeepOnlyTheMatchingCachedQuery() async throws {
         let fixture = try AcademicFixture()
         defer { fixture.removeFiles() }
@@ -25,7 +145,8 @@ import Testing
         }
 
         await fixture.provider.setMalformed()
-        let fallback = try await fixture.coordinator.academicData(.schedule, fields: week)
+        let fallback = try await fixture.coordinator.academicData(.schedule, fields: week, forceRefresh: true)
+        #expect(fallback.syncFailed)
         guard case .schedule(let older) = fallback.content else { Issue.record("Expected a cached schedule"); return }
         #expect(fallback.isCached)
         #expect(!fallback.needsAuthorization)
@@ -36,7 +157,7 @@ import Testing
         }
 
         await fixture.provider.setFailure(.expired)
-        let expired = try await fixture.coordinator.academicData(.schedule, fields: week)
+        let expired = try await fixture.coordinator.academicData(.schedule, fields: week, forceRefresh: true)
         #expect(expired.isCached)
         #expect(expired.needsAuthorization)
         let snapshot = try await fixture.coordinator.snapshot().first { $0.platform == .academic }
@@ -61,7 +182,8 @@ import Testing
         let fresh = try await fixture.coordinator.academicData(.grades, fields: fields)
         #expect(!fresh.isCached)
         await fixture.provider.setHTML(table.replacingOccurrences(of: ">90<", with: ">60<"))
-        let cached = try await fixture.coordinator.academicData(.grades, fields: fields)
+        let cached = try await fixture.coordinator.academicData(.grades, fields: fields, forceRefresh: true)
+        #expect(cached.syncFailed)
         guard case let .grades(grades) = cached.content else { Issue.record("Expected cached grades"); return }
         #expect(cached.isCached)
         #expect(grades.rows.first?.grade == "90")
@@ -78,7 +200,7 @@ import Testing
 
         let gate = AcademicReadGate()
         await fixture.provider.pauseNextRead(at: gate)
-        let inFlight = Task { try await core.academicData(.schedule, fields: nil) }
+        let inFlight = Task { try await core.academicData(.schedule, fields: nil, forceRefresh: true) }
         await gate.waitUntilEntered()
         try await core.disconnect(.academic)
         try await core.connect(.academic, using: AcademicFixture.Authorization())
@@ -120,20 +242,29 @@ private struct AcademicFixture {
 }
 
 private actor TestAcademicPageProvider: AcademicPageProvider {
-    private var html = """
-        <form><select name=xnxq01id><option value=sample>示例学期</option></select>
-        <select name=zc><option value=3>第3周</option></select>
-        <input type=hidden name=csrf value=synthetic-opaque-value></form>
-        <table id=kbtable><tr><th>节次</th><th>周一</th><th>周二</th><th>周三</th><th>周四</th><th>周五</th><th>周六</th><th>周日</th></tr>
-        <tr><th>第1节</th><td><div class=kbcontent>合成课程<br><font title="周次(节次)">3(周)[01节]</font></div></td>
-        <td></td><td></td><td></td><td></td><td></td><td></td></tr></table>
-        """
+    static func scheduleHTML(week: String = "3", periodScheme: String? = nil, course: String = "合成课程") -> String {
+        let scheme = periodScheme.map { "<select name=scheme aria-label=节次方案><option value=\($0)>示例方案</option></select>" } ?? ""
+        return """
+            <form><select name=xnxq01id><option value=sample>示例学期</option></select>
+            <select name=zc><option value=\(week)>第\(week)周</option></select>\(scheme)
+            <input type=hidden name=csrf value=synthetic-opaque-value></form>
+            <table id=kbtable><tr><th>节次</th><th>周一</th><th>周二</th><th>周三</th><th>周四</th><th>周五</th><th>周六</th><th>周日</th></tr>
+            <tr><th>第1节</th><td><div class=kbcontent>\(course)<br><font title="周次(节次)">\(week)(周)[01节]</font></div></td>
+            <td></td><td></td><td></td><td></td><td></td><td></td></tr></table>
+            """
+    }
+
+    private var html = scheduleHTML()
+    private var termSchedule: AcademicSchedule?
+    private var semesterSchemaFailure = false
     private var failure: ProviderFailure?
     private var gate: AcademicReadGate?
     private(set) var requestCount = 0
 
     func setHTML(_ value: String) { html = value }
     func setMalformed() { html = "<html><body>非课表页面</body></html>" }
+    func setSemesterSchedule(_ value: AcademicSchedule) { termSchedule = value }
+    func setSemesterSchemaFailure() { semesterSchemaFailure = true }
     func setFailure(_ value: ProviderFailure) { failure = value }
     func pauseNextRead(at gate: AcademicReadGate) { self.gate = gate }
 
@@ -150,7 +281,8 @@ private actor TestAcademicPageProvider: AcademicPageProvider {
             await gate.pause()
         }
         if let failure { throw failure }
-        return AcademicPage(html: html, session: session)
+        if endpoint == .semesterSchedule, semesterSchemaFailure { throw AcademicHTML.Error.unexpectedPage }
+        return AcademicPage(html: html, session: session, semesterSchedule: endpoint == .semesterSchedule ? termSchedule : nil)
     }
 }
 

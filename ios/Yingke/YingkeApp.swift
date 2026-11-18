@@ -1,6 +1,8 @@
 import CampusCore
 import SwiftUI
 
+enum HomeRoute: Hashable { case timetable }
+
 @main
 struct YingkeApp: App {
     @Environment(\.scenePhase) private var scenePhase
@@ -10,7 +12,14 @@ struct YingkeApp: App {
         WindowGroup {
             TabView {
                 NavigationStack {
-                    HomeView()
+                    HomeView(academicIsBound: model.snapshot(for: .academic)?.bindingID != nil)
+                        .navigationDestination(for: HomeRoute.self) { _ in
+                            if let bindingID = model.snapshot(for: .academic)?.bindingID {
+                                BoundAcademicDataView(endpoint: .semesterSchedule, bindingID: bindingID, model: model)
+                            } else {
+                                PlatformDetailView(platform: .academic, model: model)
+                            }
+                        }
                         .navigationDestination(for: CampusPlatform.self) { platform in
                             PlatformDetailView(platform: platform, model: model)
                         }
